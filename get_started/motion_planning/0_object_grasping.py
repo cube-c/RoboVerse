@@ -24,54 +24,47 @@ class GSNet:
 
     def __init__(self):
         """This function is used to initialize the configuration."""
-        dir = os.path.dirname(os.path.abspath(__file__))
-
-        class Config:
-            pass
-
-        self.cfgs = Config()
-        self.cfgs.dataset_root = f"{dir}/data/datasets/graspnet"
-        self.cfgs.checkpoint_path = "third_party/gsnet/assets/minkuresunet_realsense_tune_epoch20.tar"
-        self.cfgs.dump_dir = "logs"
-        self.cfgs.seed_feat_dim = 512
-        self.cfgs.camera = "realsense"
-        self.cfgs.num_point = 15000
-        self.cfgs.batch_size = 1
-        self.cfgs.voxel_size = 0.005
-        self.cfgs.collision_thresh = 0.01
-        self.cfgs.voxel_size_cd = 0.01
-        self.cfgs.infer = False
-        self.cfgs.vis = False
-        self.cfgs.scene = "0188"
-        self.cfgs.index = "0000"
+        self.checkpoint_path = "third_party/gsnet/assets/minkuresunet_realsense_tune_epoch20.tar"
+        self.seed_feat_dim = 512
+        self.num_point = 15000
+        self.batch_size = 1
+        self.voxel_size = 0.005
+        self.collision_thresh = 0.01
+        self.voxel_size_cd = 0.01
+        self.infer = False
+        self.vis = False
+        self.dump_dir = "logs"
+        self.camera = "realsense"
+        self.scene = "0188"
+        self.index = "0000"
 
     def inference(self, cloud_masked, max_grasps=200):
         """This function is used to infer the grasp from the point cloud."""
         # sample points random
-        if len(cloud_masked) >= self.cfgs.num_point:
-            idxs = np.random.choice(len(cloud_masked), self.cfgs.num_point, replace=False)
+        if len(cloud_masked) >= self.num_point:
+            idxs = np.random.choice(len(cloud_masked), self.num_point, replace=False)
             # print("sampled point cloud idxs:", idxs.shape)
         else:
             idxs1 = np.arange(len(cloud_masked))
-            idxs2 = np.random.choice(len(cloud_masked), self.cfgs.num_point - len(cloud_masked), replace=True)
+            idxs2 = np.random.choice(len(cloud_masked), self.num_point - len(cloud_masked), replace=True)
             idxs = np.concatenate([idxs1, idxs2], axis=0)
         cloud_sampled = cloud_masked[idxs]
 
         data_dict = {
             "point_clouds": cloud_sampled.astype(np.float32),
-            "coors": cloud_sampled.astype(np.float32) / self.cfgs.voxel_size,
+            "coors": cloud_sampled.astype(np.float32) / self.voxel_size,
             "feats": np.ones_like(cloud_sampled).astype(np.float32),
         }
 
         batch_data = minkowski_collate_fn([data_dict])
-        net = GraspNet(seed_feat_dim=self.cfgs.seed_feat_dim, is_training=False)
+        net = GraspNet(seed_feat_dim=self.seed_feat_dim, is_training=False)
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         net.to(device)
 
         # Load checkpoint
-        checkpoint = torch.load(self.cfgs.checkpoint_path)
+        checkpoint = torch.load(self.checkpoint_path)
         net.load_state_dict(checkpoint["model_state_dict"])
-        start_epoch = checkpoint["epoch"]
+        # start_epoch = checkpoint["epoch"]
         # print("-> loaded checkpoint %s (epoch: %d)" % (cfgs.checkpoint_path, start_epoch))
 
         net.eval()
@@ -96,12 +89,12 @@ class GSNet:
         gg = GraspGroup(preds)
 
         # collision detection
-        if self.cfgs.collision_thresh > 0:
+        if self.collision_thresh > 0:
             cloud = data_dict["point_clouds"]
 
             # Model-free collision detector
-            mfcdetector = ModelFreeCollisionDetector(cloud, voxel_size=self.cfgs.voxel_size_cd)
-            collision_mask_mfc = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=self.cfgs.collision_thresh)
+            mfcdetector = ModelFreeCollisionDetector(cloud, voxel_size=self.voxel_size_cd)
+            collision_mask_mfc = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=self.collision_thresh)
             gg = gg[~collision_mask_mfc]
 
             # # Franka collision detector
