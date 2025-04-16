@@ -52,3 +52,12 @@ cd ..
 
 ## Checkpoint and Test Case
 ### Download Checkpoint and Test Case
+
+Download from Google Drive:
+through this [link](https://drive.google.com/drive/folders/1g6NCoFwtRtJLGtwSq79aPgOylW8CxVQK?usp=sharing)
+
+### Test Case
+
+```bash
+python third_party/gsnet/gsnet.py
+```
