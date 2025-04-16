@@ -8,15 +8,18 @@ import numpy as np
 import torch
 import torch.nn as nn
 import MinkowskiEngine as ME
+import rootutils
+
+rootutils.setup_root(__file__, pythonpath=True)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
 sys.path.append(ROOT_DIR)
 
-from models.backbone_resunet14 import MinkUNet14D
-from models.modules import ApproachNet, GraspableNet, CloudCrop, SWADNet
-from loss_utils import GRASP_MAX_WIDTH, NUM_VIEW, NUM_ANGLE, NUM_DEPTH, GRASPNESS_THRESHOLD, M_POINT
-from label_generation import process_grasp_labels, match_grasp_view_and_label, batch_viewpoint_params_to_matrix
+from third_party.gsnet.models.backbone_resunet14 import MinkUNet14D
+from third_party.gsnet.models.modules import ApproachNet, GraspableNet, CloudCrop, SWADNet
+from third_party.gsnet.utils.loss_utils import GRASP_MAX_WIDTH, NUM_VIEW, NUM_ANGLE, NUM_DEPTH, GRASPNESS_THRESHOLD, M_POINT
+from third_party.gsnet.utils.label_generation import process_grasp_labels, match_grasp_view_and_label, batch_viewpoint_params_to_matrix
 from pointnet2.pointnet2_utils import furthest_point_sample, gather_operation
 
 
@@ -63,7 +66,7 @@ class GraspNet(nn.Module):
             graspable_num_batch += cur_mask.sum()
             cur_feat = seed_features_flipped[i][cur_mask]  # Ns*feat_dim
             cur_seed_xyz = seed_xyz[i][cur_mask]  # Ns*3
-            
+
             # xmfang add
             if cur_feat.shape[0] == 0:
                 return None
