@@ -136,11 +136,3 @@ if __name__ == '__main__':
     gsnet = GSNet()
     gg = gsnet.inference(np.array(cloud.points))
     gsnet.visualize(cloud, gg)
-
-
-    # except Exception as e:
-    #     print(e)
-    #     import traceback
-    #     traceback.print_exc()
-    #     print("error")
-    #     sys.exit(1)
