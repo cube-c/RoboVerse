@@ -48,3 +48,7 @@ cd graspnetAPI
 pip install .
 cd ..
 ```
+
+
+## Checkpoint and Test Case
+### Download Checkpoint and Test Case

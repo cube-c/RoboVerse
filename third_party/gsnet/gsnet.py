@@ -131,16 +131,8 @@ class GSNet():
 if __name__ == '__main__':
     import open3d as o3d
     # try:
-    cloud = o3d.io.read_point_cloud(f"{ROOT_DIR}/assets/pointcloud_raft.ply")
-    # breakpoint()
-    # _cloud = np.asarray(cloud.points)
-    # _cloud[:,2] = -_cloud[:,2]
-    # _cloud[:,1] = -_cloud[:,1]
-    # # normalize
-    # # breakpoint()
-    # # l2 normalize
-    # _cloud = _cloud / np.linalg.norm(_cloud, axis=1, keepdims=True).max()
-    # cloud.points = o3d.utility.Vector3dVector(_cloud)
+    cloud = o3d.io.read_point_cloud(f"{ROOT_DIR}/assets/test.ply")
+
     gsnet = GSNet()
     gg = gsnet.inference(np.array(cloud.points))
     gsnet.visualize(cloud, gg)
