@@ -1,4 +1,4 @@
-"""This script is used to grasp an object from a point cloud."""
+"""This file is used to grasp an object from a point cloud."""
 
 import os
 import time
@@ -97,11 +97,6 @@ class GSNet:
             collision_mask_mfc = mfcdetector.detect(gg, approach_dist=0.05, collision_thresh=self.collision_thresh)
             gg = gg[~collision_mask_mfc]
 
-            # # Franka collision detector
-            # fcdetector = FrankaCollisionDetector(cloud, voxel_size=self.cfgs.voxel_size_cd)
-            # collision_mask_fc, global_iou_fc = fcdetector.detect(gg, approach_dist=0.05, collision_thresh=self.cfgs.collision_thresh)
-            # gg = gg[~collision_mask_fc]
-
         gg = gg.nms()
         gg = gg.sort_by_score()
 
@@ -110,9 +105,38 @@ class GSNet:
 
         return gg
 
-    def visualize(self, cloud, gg: GraspGroup = None, g: Grasp = None):
+    def visualize(self, cloud, gg: GraspGroup = None, g: Grasp = None, image_only=False):
         """This function is used to visualize the grasp group or grasp."""
         pcd = cloud
+        if image_only:
+            # save image
+            points = np.asarray(pcd.points)
+            rotation = np.array([[0, 1, 0], [0, 0, -1], [-1, 0, 0]])
+            rotation_along_x = np.array([[1, 0, 0], [0, np.cos(70), -np.sin(70)], [0, np.sin(70), np.cos(70)]])
+            rotation = rotation_along_x @ rotation
+            points = points @ rotation.T
+            pcd.points = o3d.utility.Vector3dVector(points)
+
+            vis = o3d.visualization.Visualizer()
+            vis.create_window(visible=True)
+            vis.add_geometry(pcd)
+            grippers = gg.to_open3d_geometry_list()
+            vertices = np.asarray(grippers[0].vertices)
+            vertices = vertices @ rotation.T
+            grippers[0].vertices = o3d.utility.Vector3dVector(vertices)
+            vis.add_geometry(*grippers)
+            vis.poll_events()
+            vis.update_renderer()
+
+            image = vis.capture_screen_float_buffer()
+            import imageio
+
+            image = np.asarray(image)
+            imageio.imwrite(
+                "get_started/output/motion_planning/gsnet_visualization.png", (image * 255).astype(np.uint8)
+            )
+            vis.destroy_window()
+            return
         if gg is not None:
             grippers = gg.to_open3d_geometry_list()
             o3d.visualization.draw_geometries([pcd, *grippers])
@@ -121,14 +145,3 @@ class GSNet:
             o3d.visualization.draw_geometries([pcd, gripper])
         else:
             o3d.visualization.draw_geometries([pcd])
-
-
-if __name__ == "__main__":
-    import open3d as o3d
-
-    # try:
-    cloud = o3d.io.read_point_cloud("third_party/gsnet/assets/test.ply")
-
-    gsnet = GSNet()
-    gg = gsnet.inference(np.array(cloud.points))
-    gsnet.visualize(cloud, gg)
