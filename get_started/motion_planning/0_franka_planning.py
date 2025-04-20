@@ -196,7 +196,7 @@ for step in range(4):
     ee_quat_target[0] = torch.tensor(quat, device="cuda:0")
 
     obs = move_to_pose(
-        obs, obs_saver, robot_ik, robot, scenario, ee_pos_target, ee_quat_target, steps=70, open_gripper=True
+        obs, obs_saver, robot_ik, robot, scenario, ee_pos_target, ee_quat_target, steps=100, open_gripper=True
     )
     step += 1
 
