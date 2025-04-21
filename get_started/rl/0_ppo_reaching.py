@@ -41,7 +41,7 @@ class Args(ScenarioCfg):
     task: str = "debug:reach_far_away"
     robot: str = "franka"
     num_envs: int = 16
-    sim: Literal["isaaclab", "isaacgym", "mujoco"] = "isaaclab"
+    sim: Literal["isaaclab", "isaacgym", "mujoco", "genesis"] = "isaaclab"
 
 
 args = tyro.cli(Args)
@@ -264,7 +264,7 @@ def train_ppo():
     scenario = ScenarioCfg(**vars(args))
     scenario.cameras = [PinholeCameraCfg(width=1024, height=1024, pos=(1.5, -1.5, 1.5), look_at=(0.0, 0.0, 0.0))]
     metasim_env = MetaSimVecEnv(scenario, task_name=args.task, num_envs=args.num_envs, sim=args.sim)
-    obs_saver = ObsSaver(video_path=f"get_started/output/rl/0_ppo_reaching_{args.sim}.mp4")
+    obs_saver = ObsSaver(video_path=f"get_started/output/rl/0_ppo_reaching_{args.task}_{args.sim}.mp4")
     # load the model
     model = PPO.load("ppo_reach")
 
