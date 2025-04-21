@@ -25,7 +25,9 @@ from stable_baselines3.common.vec_env import VecEnv
 rootutils.setup_root(__file__, pythonpath=True)
 log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 
+from get_started.utils import ObsSaver
 from metasim.cfg.scenario import ScenarioCfg
+from metasim.cfg.sensors import PinholeCameraCfg
 from metasim.constants import SimType
 from metasim.sim import BaseSimHandler, EnvWrapper
 from metasim.utils.demo_util import get_traj
@@ -36,7 +38,7 @@ from metasim.utils.setup_util import get_sim_env_class
 class Args(ScenarioCfg):
     """Arguments for training PPO."""
 
-    task: str = "debug:reach_origin"
+    task: str = "debug:reach_far_away"
     robot: str = "franka"
     num_envs: int = 16
     sim: Literal["isaaclab", "isaacgym", "mujoco"] = "isaaclab"
@@ -250,7 +252,36 @@ def train_ppo():
 
     # Start training
     model.learn(total_timesteps=1_000_000)
+
+    # Save the model
     model.save("ppo_reach")
+
+    env.close()
+
+    # Inference and Save Video
+    # add cameras to the scenario
+    args.num_envs = 16
+    scenario = ScenarioCfg(**vars(args))
+    scenario.cameras = [PinholeCameraCfg(width=1024, height=1024, pos=(1.5, -1.5, 1.5), look_at=(0.0, 0.0, 0.0))]
+    metasim_env = MetaSimVecEnv(scenario, task_name=args.task, num_envs=args.num_envs, sim=args.sim)
+    obs_saver = ObsSaver(video_path=f"get_started/output/rl/0_ppo_reaching_{args.sim}.mp4")
+    # load the model
+    model = PPO.load("ppo_reach")
+
+    # inference
+    obs, _ = metasim_env.reset()
+    obs_orin = metasim_env.env.handler.get_states()
+    obs_saver.add(obs_orin)
+    for _ in range(100):
+        actions, _ = model.predict(obs.cpu().numpy(), deterministic=True)
+        action_dicts = [
+            {"dof_pos_target": dict(zip(metasim_env.scenario.robot.joint_limits.keys(), action))} for action in actions
+        ]
+        obs, _, _, _, _ = metasim_env.step(action_dicts)
+
+        obs_orin = metasim_env.env.handler.get_states()
+        obs_saver.add(obs_orin)
+    obs_saver.save()
 
 
 if __name__ == "__main__":
