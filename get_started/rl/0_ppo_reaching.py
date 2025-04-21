@@ -254,7 +254,8 @@ def train_ppo():
     model.learn(total_timesteps=1_000_000)
 
     # Save the model
-    model.save("ppo_reach")
+    task_name = scenario.task.__class__.__name__[:-3]
+    model.save(f"get_started/output/rl/0_ppo_reaching_{task_name}_{args.sim}")
 
     env.close()
 
@@ -264,9 +265,10 @@ def train_ppo():
     scenario = ScenarioCfg(**vars(args))
     scenario.cameras = [PinholeCameraCfg(width=1024, height=1024, pos=(1.5, -1.5, 1.5), look_at=(0.0, 0.0, 0.0))]
     metasim_env = MetaSimVecEnv(scenario, task_name=args.task, num_envs=args.num_envs, sim=args.sim)
-    obs_saver = ObsSaver(video_path=f"get_started/output/rl/0_ppo_reaching_{args.task}_{args.sim}.mp4")
+    task_name = scenario.task.__class__.__name__[:-3]
+    obs_saver = ObsSaver(video_path=f"get_started/output/rl/0_ppo_reaching_{task_name}_{args.sim}.mp4")
     # load the model
-    model = PPO.load("ppo_reach")
+    model = PPO.load(f"get_started/output/rl/0_ppo_reaching_{task_name}_{args.sim}")
 
     # inference
     obs, _ = metasim_env.reset()
