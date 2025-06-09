@@ -12,36 +12,56 @@ import tyro
 from loguru import logger as log
 from rich.logging import RichHandler
 
+from metasim.cfg.robots import FrankaCfg, H1Cfg
 from metasim.cfg.scenario import ScenarioCfg
 from metasim.constants import SimType
 from metasim.utils.setup_util import get_sim_env_class
 
 log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 
+FRANKA_CFG = FrankaCfg()
+H1_CFG = H1Cfg()
+
 
 @dataclass
 class Args:
     num_envs: int = 1
     sim: str = "isaaclab"
-    robot: str = "franka"
     z_pos: float = 0.0
     decimation: int = 20
 
 
 def main():
     args = tyro.cli(Args)
-    scenario = ScenarioCfg(robots=[args.robot], sim=args.sim, num_envs=args.num_envs, decimation=args.decimation)
+    scenario = ScenarioCfg(
+        robots=[
+            FRANKA_CFG.replace(name="franka_1"),
+            FRANKA_CFG.replace(name="franka_2"),
+            H1_CFG.replace(name="h1_1"),
+            H1_CFG.replace(name="h1_2"),
+        ],
+        sim=args.sim,
+        num_envs=args.num_envs,
+        decimation=args.decimation,
+    )
 
     log.info(f"Using simulator: {args.sim}")
     env_class = get_sim_env_class(SimType(args.sim))
     env = env_class(scenario)
 
-    robot = scenario.robots[0]
-    init_states = [{"robots": {robot.name: {"pos": [0.0, 0.0, args.z_pos]}}, "objects": {}}] * scenario.num_envs
+    init_states = [
+        {
+            "robots": {
+                "franka_1": {"pos": torch.tensor([1.0, 1.0, args.z_pos]), "rot": torch.tensor([1.0, 0.0, 0.0, 0.0])},
+                "franka_2": {"pos": torch.tensor([1.0, -1.0, args.z_pos]), "rot": torch.tensor([1.0, 0.0, 0.0, 0.0])},
+                "h1_1": {"pos": torch.tensor([-1.0, 1.0, args.z_pos]), "rot": torch.tensor([1.0, 0.0, 0.0, 0.0])},
+                "h1_2": {"pos": torch.tensor([-1.0, -1.0, args.z_pos]), "rot": torch.tensor([1.0, 0.0, 0.0, 0.0])},
+            },
+            "objects": {},
+        }
+    ] * scenario.num_envs
     env.reset(states=init_states)
 
-    joint_min = {jn: robot.joint_limits[jn][0] for jn in robot.joint_limits.keys()}
-    joint_max = {jn: robot.joint_limits[jn][1] for jn in robot.joint_limits.keys()}
     step = 0
     while True:
         log.debug(f"Step {step}")
@@ -49,11 +69,15 @@ def main():
             {
                 robot.name: {
                     "dof_pos_target": {
-                        jn: (torch.rand(1).item() * (joint_max[jn] - joint_min[jn]) + joint_min[jn])
+                        jn: (
+                            torch.rand(1).item() * (robot.joint_limits[jn][1] - robot.joint_limits[jn][0])
+                            + robot.joint_limits[jn][0]
+                        )
                         for jn in robot.actuators.keys()
                         if robot.actuators[jn].fully_actuated
                     }
                 }
+                for robot in scenario.robots
             }
             for _ in range(scenario.num_envs)
         ]
