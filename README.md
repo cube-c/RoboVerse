@@ -72,6 +72,15 @@ RoboVerse also integrates data from the following projects:
 
 The licenses for the assets used in RoboVerse will be added soon. Please contact us if you have any issues.
 
+## License
+
+ This work and the dataset are licensed under [CC BY-NC 4.0][cc-by-nc]. Please contact ghr@berkeley.edu for more information.
+
+ [![CC BY-NC 4.0][cc-by-nc-image]][cc-by-nc]
+
+ [cc-by-nc]: https://creativecommons.org/licenses/by-nc/4.0/
+ [cc-by-nc-image]: https://licensebuttons.net/l/by-nc/4.0/88x31.png
+ 
 ## Citation
 If you find RoboVerse useful, please consider citing it:
 ```bibtex
