@@ -36,12 +36,7 @@ You can also upvote the requests you find most relevant or important. We'll prio
 
 ## 📖 License and Acknowledgments
 
-This work and the dataset are licensed under [CC BY-NC 4.0][cc-by-nc]. Please contact ghr@berkeley.edu for more information.
-
-[![CC BY-NC 4.0][cc-by-nc-image]][cc-by-nc]
-
-[cc-by-nc]: https://creativecommons.org/licenses/by-nc/4.0/
-[cc-by-nc-image]: https://licensebuttons.net/l/by-nc/4.0/88x31.png
+The RoboVerse source code is licensed under the Apache License 2.0.
 
 RoboVerse makes use of the following simulation frameworks, renderers, and libraries:
 - [Isaac Lab](https://github.com/isaac-sim/IsaacLab), which is built on top of [Isaac Sim](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)
