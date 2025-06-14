@@ -31,4 +31,4 @@ final_lr_fraction: 0.1    # final learning rate is 10% of initial learning rate
 # Wandb settings
 use_wandb: false
 wandb_project: humanoidbench_rl_training
-wandb_entity: <wandb entity>
+wandb_entity: <YOUR_WANDB_ENTITY>
