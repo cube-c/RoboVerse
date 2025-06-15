@@ -44,7 +44,7 @@ Add any other context about the problem here.
 ### Checklist
 
 - [ ] I have checked that there is no similar issue in the repo (**required**)
-- [ ] I have checked that the issue is not in the simulator backend(s) itself and is related to the repo
+- [ ] I have checked that the issue is not in the simulator backends (IsaacLab, IsaacGym, MuJoCo, etc.) and is related to the RoboVerse repo
 
 ### Acceptance Criteria
 
