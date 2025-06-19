@@ -3,9 +3,9 @@
 ## Prerequisite
 1. [supersplat](https://github.com/playcanvas/supersplat)
 2. [colmap](https://colmap.github.io/) / [glomap](https://github.com/colmap/glomap)
-3. [gsplat](https://github.com/nerfstudio-project/gsplat)
+3. [robogs](https://github.com/louhz/robogs)
 4. [StableNormal](https://github.com/Stable-X/StableNormal)
-5. [2DGS](https://github.com/hugoycj/2d-gaussian-splatting-great-again)
+
 
 ### note for installation
 for stablenormal, please follow this issue if you have installation issue: https://github.com/Stable-X/StableNormal/issues/34
