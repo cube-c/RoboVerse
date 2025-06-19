@@ -17,7 +17,7 @@ for stablenormal, please follow this issue if you have installation issue: https
 2. Run colmap
 3. Run gsplat
 4. Extract normal map (StableNormal)
-5. Extract mesh (2DGS)
+5. Extract mesh 
 6. Recenter and reorientation
 7. Segment 3DGS and mesh
 8. Assign ID for 3DGS
