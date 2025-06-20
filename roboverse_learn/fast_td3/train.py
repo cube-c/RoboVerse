@@ -7,6 +7,7 @@ import time
 
 os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["CUDA_VISIBLE_DEVICE"] = "2"
 
 if sys.platform != "darwin":
     os.environ["MUJOCO_GL"] = "egl"
@@ -142,8 +143,6 @@ def main() -> None:
     )
     scenario_render.task.decimation = cfg("decimation", 1)
 
-    render_env = FastTD3EnvWrapper(scenario_render, device=device)
-
     # ---------------- derive shapes ------------------------------------
     n_act = envs.num_actions
     n_obs = envs.num_obs
@@ -261,7 +260,7 @@ def main() -> None:
         video_path: str = cfg("video_path", "output/rollout.mp4")
         os.makedirs(os.path.dirname(video_path), exist_ok=True)
         obs_normalizer.eval()
-
+        render_env = FastTD3EnvWrapper(scenario_render, device=device)
         # first frame after reset
         obs = render_env.reset()
         frames = [render_env.render()]
@@ -290,6 +289,7 @@ def main() -> None:
         writer.release()
 
         print(f"[render_with_rollout] MP4 saved to {video_path}")
+        render_env.close()
 
     def update_main(data, logs_dict):
         with autocast(device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled):
@@ -493,7 +493,7 @@ def main() -> None:
             if torch.cuda.is_available():
                 torch.cuda.synchronize(device)
 
-            if global_step % 10 == 0 and start_time is not None:
+            if global_step % 100 == 0 and start_time is not None:
                 speed = (global_step - measure_burnin) / (time.time() - start_time)
                 pbar.set_description(f"{speed: 4.4f} sps, " + desc)
                 with torch.no_grad():
@@ -516,9 +516,6 @@ def main() -> None:
                         logs["eval_avg_length"] = eval_avg_length
                         print(f"avg_return={eval_avg_return:.4f}, avg_length={eval_avg_length:.4f}")
 
-                    if cfg("render_interval") > 0 and global_step % cfg("render_interval") == 0:
-                        renders = render_with_rollout()
-
                 if cfg("use_wandb"):
                     wandb.log(
                         {
@@ -534,6 +531,9 @@ def main() -> None:
 
         global_step += 1
         pbar.update(1)
+        # Close environment and wandb
+    envs.close()
+    render_with_rollout()
 
 
 if __name__ == "__main__":
