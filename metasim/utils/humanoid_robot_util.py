@@ -5,13 +5,15 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from metasim.utils.math import axis_angle_from_quat, matrix_from_quat, quat_from_angle_axis, quat_mul
+
+# Charlie: isaacgym imports should not exist outside of the handler files
+# need someone to fix this
+
 try:
     from isaacgym.torch_utils import get_euler_xyz
 except ImportError:
     pass
-
-
-from metasim.utils.math import axis_angle_from_quat, matrix_from_quat, quat_from_angle_axis, quat_mul
 
 
 def torso_upright(envstate, robot_name: str):
