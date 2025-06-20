@@ -11,7 +11,39 @@ class StackCubeCfg(ManiskillTaskCfg):
     """The stack cube task from ManiSkill.
 
     The robot is tasked to pick up a cube and stack it on another cube.
+
+    .. Description:
+    ### title:
+    stack_cube
+    ### group:
+    Maniskill
+    ### description:
+    The goal is to pick up a red cube and stack it on top of a green cube and let go of the cube without it falling.
+    ### randomizations:
+    - both cubes have their z-axis rotation randomized
+    - both cubes have their xy positions on top of the table scene randomized. The positions are sampled such that the cubes do not collide with each other
+    ### success:
+    - the red cube is on top of the green cube (to within half of the cube size)
+    - the red cube is static
+    - the red cube is not being grasped by the robot (robot must let go of the cube)
+    ### platforms:
+    - genesis ✅
+    - isaacgym ✅
+    - isaaclab ✅
+    - mujoco ✅
+    - sapien3 ✅
+    ### badges:
+    - demos
+    - dense
+    - sparse
+    ### video_url:
+    https://roboverse.wiki/_static/standard_output/tasks/stack_cube.mp4
+    ### official_url:
+    https://maniskill.readthedocs.io/en/latest/tasks/table_top_gripper/index.html#stackcube-v1
+    ### poster_url:
+    (none)
     """
+
 
     episode_length = 250
     objects = [
