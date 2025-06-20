@@ -198,14 +198,16 @@ def generate_task_groups_md(TASK_REGISTRY, output_path=None):
         lines.append(f"## {group}\n")
 
         # HTML 表格开头，添加样式美化
-        lines.append('<table style="table-layout: fixed; width: 100%; border-collapse: collapse; margin-bottom: 24px;">')
+        lines.append(
+            '<table style="table-layout: fixed; width: 100%; border-collapse: collapse; margin-bottom: 24px;">'
+        )
 
         # 表头
         lines.append(
             "<thead><tr>"
-            f"<th style='width: 30%; word-wrap: break-word; text-align: left; padding: 8px; border-bottom: 2px solid #ccc; font-size: 16px;'>Task / Robot</th>"
+            "<th style='width: 30%; word-wrap: break-word; text-align: left; padding: 8px; border-bottom: 2px solid #ccc; font-size: 16px;'>Task / Robot</th>"
             + "".join([
-                f"<th style='width: {int(70/len(PLATFORMS))}%; text-align: center; padding: 8px; border-bottom: 2px solid #ccc; font-size: 16px;'>{plat}</th>"
+                f"<th style='width: {int(70 / len(PLATFORMS))}%; text-align: center; padding: 8px; border-bottom: 2px solid #ccc; font-size: 16px;'>{plat}</th>"
                 for plat in PLATFORMS
             ])
             + "</tr></thead>"
@@ -223,10 +225,10 @@ def generate_task_groups_md(TASK_REGISTRY, output_path=None):
             if len(task_name) > 25 and "_" in task_name:
                 task_name = task_name.replace("_", "_<br>", 1)
 
-            #md_path = meta.get("md_path", f"tasks_md/{tid}.md")
+            # md_path = meta.get("md_path", f"tasks_md/{tid}.md")
 
             # 第一列：任务名链接
-            #row = f"<td style='padding: 8px; font-size: 15px; border-bottom: 1px solid #eee;'><a href='{md_path}'>{task_name}</a></td>"
+            # row = f"<td style='padding: 8px; font-size: 15px; border-bottom: 1px solid #eee;'><a href='{md_path}'>{task_name}</a></td>"
             html_path = meta.get("md_path", f"tasks_md/{tid}.md").replace(".md", ".html")
             row = f"<td style='padding: 8px; font-size: 15px; border-bottom: 1px solid #eee;'><a href='{html_path}'>{task_name}</a></td>"
             # 平台支持列
@@ -245,8 +247,6 @@ def generate_task_groups_md(TASK_REGISTRY, output_path=None):
     with open(output_path, "w") as f:
         f.write("\n".join(lines))
     # print(f"✅ {output_path} generated.")
-
-
 
 
 if __name__ == "__main__":
