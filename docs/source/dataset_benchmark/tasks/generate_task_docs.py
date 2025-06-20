@@ -28,7 +28,7 @@ GROUPS = [
 PLATFORMS = ["isaaclab", "mujoco", "isaacgym", "sapien3", "genesis"]
 
 
-def parse_docstring_metadata(docstring: str) -> Dict[str, Any]:
+def parse_docstring_metadata(docstring: str):
     if not docstring:
         return {}
 
@@ -181,7 +181,8 @@ def discover_all_tasks():
 
             task_meta[safe_title] = meta
         except Exception as e:
-            print(f"❌ Failed to process {py_path}: {e}")
+            #print(f"❌ Failed to process {py_path}: {e}")
+            pass
     return task_meta
 
 
@@ -194,7 +195,7 @@ def build_task_docs(TASK_REGISTRY):
         path = os.path.join(OUTPUT_DIR, os.path.basename(meta["md_path"]))
         with open(path, "w") as f:
             f.write(generate_md(tid, meta))
-        print(f"✅ {path} written.")
+        #print(f"✅ {path} written.")
 
 
 def generate_task_groups_md(TASK_REGISTRY, output_path=None):
@@ -222,7 +223,7 @@ def generate_task_groups_md(TASK_REGISTRY, output_path=None):
 
     with open(output_path, "w") as f:
         f.write("\n".join(lines))
-    print(f"✅ {output_path} generated.")
+    #print(f"✅ {output_path} generated.")
 
 
 if __name__ == "__main__":
