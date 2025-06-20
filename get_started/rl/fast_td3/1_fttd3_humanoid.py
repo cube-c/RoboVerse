@@ -87,8 +87,8 @@ CONFIG: dict[str, Any] = {
     "exp_name": "get_started_fttd3",
     "use_wandb": False,
     "checkpoint_path": None,
-    "eval_infterval": 1000,
-    "save_interval": 1000,
+    "eval_interval": 500,
+    "save_interval": 500,
     "video_width": 1024,
     "video_height": 1024,
 }
@@ -537,12 +537,12 @@ def main() -> None:
                 }
 
                 if cfg("eval_interval") > 0 and global_step % cfg("eval_interval") == 0:
-                    log(f"Evaluating at global step {global_step}")
-                    eval_avg_return, eval_avg_length = evaluate()
+                    log.info(f"Evaluating at global step {global_step}")
+                    eval_avg_return, eval_avg_length =evaluate(actor, obs_normalizer, envs, device, amp_enabled, amp_device_type, amp_dtype)
                     obs = envs.reset()
                     logs["eval_avg_return"] = eval_avg_return
                     logs["eval_avg_length"] = eval_avg_length
-                    log(f"avg_return={eval_avg_return:.4f}, avg_length={eval_avg_length:.4f}")
+                    log.info(f"avg_return={eval_avg_return:.4f}, avg_length={eval_avg_length:.4f}")
 
             if cfg("use_wandb"):
                 wandb.log({**{k: v.mean() for k, v in logs_dict.items()}, "sps": sps}, step=global_step)
