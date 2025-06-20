@@ -31,9 +31,6 @@ class BasketballInHoopCfg(RLBenchTaskCfg):
     RLBench basketball_in_hoop task, migrated from https://github.com/stepjam/RLBench/blob/master/rlbench/tasks/basketball_in_hoop.py.
     """
 
-
-
-
     episode_length = 200
     traj_filepath = "roboverse_data/trajs/rlbench/basketball_in_hoop/v2"
     objects = [

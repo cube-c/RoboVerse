@@ -10,8 +10,7 @@ from .maniskill_task_cfg import ManiskillTaskCfg
 
 @configclass
 class PickCubeCfg(ManiskillTaskCfg):
-    """
-    .. Description:
+    """.. Description:
 
     ### 📦 Source Metadata (from ManiSkill or other official sources)
     ### title:
