@@ -7,7 +7,6 @@ import time
 
 os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["CUDA_VISIBLE_DEVICE"] = "2"
 
 if sys.platform != "darwin":
     os.environ["MUJOCO_GL"] = "egl"
