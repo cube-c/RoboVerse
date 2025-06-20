@@ -1,10 +1,9 @@
-import os
-import sys
 import ast
 import glob
-import shutil
+import os
 import re
-from typing import Dict, Any
+import shutil
+from typing import Any, Dict
 
 CUR_DIR = os.path.dirname(os.path.abspath(__file__))
 TASK_CFG_ROOT = os.path.abspath(os.path.join(CUR_DIR, "../../../../metasim/cfg/tasks"))
@@ -13,8 +12,18 @@ VIDEO_BASE = "https://videos.example.com"
 DEFAULT_DESC = "No description provided."
 
 GROUPS = [
-    "Maniskill", "RLBench", "Libero", "Calvin", "Graspnet", "Gapartnet",
-    "Arnold", "Unidoormanip", "Simpler", "Robosuite", "Metaworld", "Rlafford"
+    "Maniskill",
+    "RLBench",
+    "Libero",
+    "Calvin",
+    "Graspnet",
+    "Gapartnet",
+    "Arnold",
+    "Unidoormanip",
+    "Simpler",
+    "Robosuite",
+    "Metaworld",
+    "Rlafford",
 ]
 PLATFORMS = ["isaaclab", "mujoco", "isaacgym", "sapien3", "genesis"]
 
@@ -90,6 +99,7 @@ def render_badges(meta):
 
     return "\n".join(display_lines + [""] + definition_lines) if display_lines else ""
 
+
 def generate_md(tid: str, meta: dict) -> str:
     title = meta.get("title", tid)
     desc = meta.get("description", DEFAULT_DESC)
@@ -100,6 +110,7 @@ def generate_md(tid: str, meta: dict) -> str:
         elif isinstance(value, str) and value.startswith("[") and value.endswith("]"):
             try:
                 import ast
+
                 items = ast.literal_eval(value)
                 if isinstance(items, list):
                     return "\n" + "\n".join([f"- {item}" for item in items])
@@ -142,7 +153,7 @@ def discover_all_tasks():
             continue  # 跳过 __init__.py
 
         try:
-            with open(py_path, "r") as f:
+            with open(py_path) as f:
                 doc = f.read()
             tree = ast.parse(doc)
 
@@ -168,7 +179,6 @@ def discover_all_tasks():
             else:
                 meta["group"] = group_raw.capitalize()
 
-
             task_meta[safe_title] = meta
         except Exception as e:
             print(f"❌ Failed to process {py_path}: {e}")
@@ -186,6 +196,7 @@ def build_task_docs(TASK_REGISTRY):
             f.write(generate_md(tid, meta))
         print(f"✅ {path} written.")
 
+
 def generate_task_groups_md(TASK_REGISTRY, output_path=None):
     if output_path is None:
         output_path = os.path.join(CUR_DIR, "task_groups.md")
@@ -195,10 +206,7 @@ def generate_task_groups_md(TASK_REGISTRY, output_path=None):
         lines.append("| Task / Robot | " + " | ".join(PLATFORMS) + " |")
         lines.append("|" + "--------------|" * (len(PLATFORMS) + 1))
 
-        group_tasks = [
-            (tid, meta) for tid, meta in TASK_REGISTRY.items()
-            if meta.get("group") == group
-        ]
+        group_tasks = [(tid, meta) for tid, meta in TASK_REGISTRY.items() if meta.get("group") == group]
 
         for tid, meta in group_tasks:
             task_name = meta.get("title", tid)
@@ -215,7 +223,6 @@ def generate_task_groups_md(TASK_REGISTRY, output_path=None):
     with open(output_path, "w") as f:
         f.write("\n".join(lines))
     print(f"✅ {output_path} generated.")
-
 
 
 if __name__ == "__main__":

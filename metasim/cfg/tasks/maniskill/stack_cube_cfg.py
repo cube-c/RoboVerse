@@ -44,7 +44,6 @@ class StackCubeCfg(ManiskillTaskCfg):
     (none)
     """
 
-
     episode_length = 250
     objects = [
         PrimitiveCubeCfg(
