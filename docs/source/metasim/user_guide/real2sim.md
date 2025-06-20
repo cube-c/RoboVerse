@@ -46,14 +46,23 @@ flowchart-elk LR
 ### 2. Run colmap
 Extract camera poses and sparse point cloud from video.
 
-
+### 3. Train Gaussian Splatting
     
-### 3. Extract normal map (StableNormal)
+### 4. Extract normal map (StableNormal)
 Predict normal map from video.
 
 inference every images we use for reconstruction and save it to folder name:normals
 
 
 
+### 5. Extract mesh 
+### 6. Recenter and reorientation
+### 7. Segment 3DGS and mesh
+### 8. Assign ID for 3DGS
+### 9. Fix kinemics & dynamics parameters
+### 10. Align coordinate and scale (between mesh, 3DGS, and physics engines)
+### 11. Construct URDF
+### 12. Physics-awared 3DGS rendering (with FK, IK, and collision detection)
+### 13. Load URDF for simulation
 
 
