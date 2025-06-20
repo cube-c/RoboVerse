@@ -10,13 +10,15 @@
 ### note for installation
 for stablenormal, please follow this issue if you have installation issue: https://github.com/Stable-X/StableNormal/issues/34
 
-for detail of the process please follow the docoment from robogs
+for detail of the process 4-13 please follow the docoment from robogs
+
+After you have the URDF(mjcf), You can utilize the infra of Roboverse for training and sim2real deployment.
 
 ## Process
 1. Take a video
 2. Run colmap
-3. Run Reconstruction
-4. Extract normal map (StableNormal)
+3. Extract normal map (StableNormal)
+4. Run Reconstruction
 5. Extract mesh 
 6. Recenter and reorientation
 7. Segment 3DGS and mesh
@@ -46,23 +48,10 @@ flowchart-elk LR
 ### 2. Run colmap
 Extract camera poses and sparse point cloud from video.
 
-### 3. Train Gaussian Splatting
+
     
-### 4. Extract normal map (StableNormal)
+### 3. Extract normal map (StableNormal)
 Predict normal map from video.
 
 inference every images we use for reconstruction and save it to folder name:normals
-
-
-
-### 5. Extract mesh 
-### 6. Recenter and reorientation
-### 7. Segment 3DGS and mesh
-### 8. Assign ID for 3DGS
-### 9. Fix kinemics & dynamics parameters
-### 10. Align coordinate and scale (between mesh, 3DGS, and physics engines)
-### 11. Construct URDF
-### 12. Physics-awared 3DGS rendering (with FK, IK, and collision detection)
-### 13. Load URDF for simulation
-
 
