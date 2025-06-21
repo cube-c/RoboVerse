@@ -20,7 +20,7 @@ We provide tutorials for training FastTD3, inference and saving video. In this e
 Run the following command to train a humanoid agent using FastTD3:
 
 ```bash
-python /home/ghr/murphy/RoboVerse/get_started/rl/fast_td3/1_fttd3_humanoid.py
+python RoboVerse/get_started/rl/fast_td3/1_fttd3_humanoid.py
 ```
 
 This script uses the following default configuration:
