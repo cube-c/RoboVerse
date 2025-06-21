@@ -42,6 +42,7 @@ FastTD3 achieves fast and stable convergence:
         <video width="100%" autoplay loop muted playsinline>
             <source src="https://roboverse.wiki/_static/standard_output/rl/1_fttd3_humanoid_Stand.mp4" type="video/mp4">
         </video>
+    </div>
 </div>
 
 #### Walk:
