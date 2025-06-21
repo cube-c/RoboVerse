@@ -37,7 +37,7 @@ FastTD3 achieves fast and stable convergence:
 
 ### You can get the video like this:
 #### Stand:
-<div style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px;">
+<div style="display: flex; justify-content: space-between; width: 100%; margin-bottom: 20px;">
     <div style="width: 48%; text-align: center;">
         <video width="100%" autoplay loop muted playsinline>
             <source src="https://roboverse.wiki/_static/standard_output/rl/1_fttd3_humanoid_Stand.mp4" type="video/mp4">
@@ -46,24 +46,22 @@ FastTD3 achieves fast and stable convergence:
 </div>
 
 #### Walk:
-<div style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px;">
-    <div style="display: flex; justify-content: space-between; width: 100%; margin-bottom: 20px;">
-        <div style="width: 48%; text-align: center;">
-            <video width="100%" autoplay loop muted playsinline>
-                <source src="https://roboverse.wiki/_static/standard_output/rl/1_fttd3_humanoid_Walk.mp4" type="video/mp4">
-            </video>
-        </div>
+<div style="display: flex; justify-content: space-between; width: 100%; margin-bottom: 20px;">
+    <div style="width: 48%; text-align: center;">
+        <video width="100%" autoplay loop muted playsinline>
+            <source src="https://roboverse.wiki/_static/standard_output/rl/1_fttd3_humanoid_Walk.mp4" type="video/mp4">
+        </video>
     </div>
 </div>
 
+
 #### Run:
-<div style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px;">
-    <div style="display: flex; justify-content: space-between; width: 100%; margin-bottom: 20px;">
-        <div style="width: 48%; text-align: center;">
-            <video width="100%" autoplay loop muted playsinline>
-                <source src="https://roboverse.wiki/_static/standard_output/rl/1_fttd3_humanoid_Run.mp4" type="video/mp4">
-            </video>
-        </div>
+<div style="display: flex; justify-content: space-between; width: 100%; margin-bottom: 20px;">
+    <div style="width: 48%; text-align: center;">
+        <video width="100%" autoplay loop muted playsinline>
+            <source src="https://roboverse.wiki/_static/standard_output/rl/1_fttd3_humanoid_Run.mp4" type="video/mp4">
+        </video>
     </div>
 </div>
+
 
