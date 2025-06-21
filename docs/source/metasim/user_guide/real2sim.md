@@ -55,3 +55,29 @@ Predict normal map from video.
 
 inference every images we use for reconstruction and save it to folder name:normals
 
+
+# citation
+
+if you find this is helpful, please cite robogs and stablenormal
+
+```bibtex
+@misc{lou2024robogsphysicsconsistentspatialtemporal,
+  title={Robo-GS: A Physics Consistent Spatial-Temporal Model for Robotic Arm with Hybrid Representation}, 
+  author={Haozhe Lou and Yurong Liu and Yike Pan and Yiran Geng and Jianteng Chen and Wenlong Ma and Chenglong Li and Lin Wang and Hengzhen Feng and Lu Shi and Liyi Luo and Yongliang Shi},
+  year={2024},
+  eprint={2408.14873},
+  archivePrefix={arXiv},
+  primaryClass={cs.RO},
+  url={https://arxiv.org/abs/2408.14873}, 
+}
+
+@misc{ye2024stablenormalreducingdiffusionvariance,
+      title={StableNormal: Reducing Diffusion Variance for Stable and Sharp Normal}, 
+      author={Chongjie Ye and Lingteng Qiu and Xiaodong Gu and Qi Zuo and Yushuang Wu and Zilong Dong and Liefeng Bo and Yuliang Xiu and Xiaoguang Han},
+      year={2024},
+      eprint={2406.16864},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2406.16864}, 
+}
+```
