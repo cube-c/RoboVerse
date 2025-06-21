@@ -15,7 +15,7 @@ pip install -e ".[mjx]"
 
 
 ## One Command to Train FastTD3, Inference and Save Video
-We provide tutorials for training FastTD3, inference and saving video. In this example, we will use stable baseline 3 to train FastTD3.
+We provide tutorials for training FastTD3, inference and saving video.
 
 Run the following command to train a humanoid agent using FastTD3:
 
