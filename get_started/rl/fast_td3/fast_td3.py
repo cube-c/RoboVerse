@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -366,6 +365,7 @@ class EmpiricalNormalization(nn.Module):
     @torch.jit.unused
     def inverse(self, y):
         return y * (self._std + self.eps) + self._mean
+
 
 class DistributionalQNetwork(nn.Module):
     def __init__(

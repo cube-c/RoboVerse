@@ -13,6 +13,7 @@ from metasim.utils.demo_util import get_traj
 from metasim.utils.setup_util import get_robot, get_sim_env_class, get_task
 from metasim.utils.state import list_state_to_tensor
 
+
 class Sb3EnvWrapper(VecEnv):
     """Wraps MetaSim environment to be compatible with Gymnasium API."""
 

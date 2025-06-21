@@ -15,7 +15,6 @@ CONFIG: dict[str, Any] = {
     "task": "humanoidbench:Walk",
     "decimation": 10,
     "train_or_eval": "train",
-
     # -------------------------------------------------------------------------------
     # Seeds & Device
     # -------------------------------------------------------------------------------
@@ -23,7 +22,6 @@ CONFIG: dict[str, Any] = {
     "cuda": True,
     "torch_deterministic": True,
     "device_rank": 0,
-
     # -------------------------------------------------------------------------------
     # Rollout & Timesteps
     # -------------------------------------------------------------------------------
@@ -32,7 +30,6 @@ CONFIG: dict[str, Any] = {
     "total_timesteps": 1200,
     "learning_starts": 10,
     "num_steps": 1,
-
     # -------------------------------------------------------------------------------
     # Replay, Batching, Discounting
     # -------------------------------------------------------------------------------
@@ -40,13 +37,11 @@ CONFIG: dict[str, Any] = {
     "batch_size": 32768,
     "gamma": 0.99,
     "tau": 0.1,
-
     # -------------------------------------------------------------------------------
     # Update Schedule
     # -------------------------------------------------------------------------------
     "policy_frequency": 2,
     "num_updates": 12,
-
     # -------------------------------------------------------------------------------
     # Optimizer & Network
     # -------------------------------------------------------------------------------
@@ -57,7 +52,6 @@ CONFIG: dict[str, Any] = {
     "actor_hidden_dim": 512,
     "init_scale": 0.01,
     "num_atoms": 101,
-
     # -------------------------------------------------------------------------------
     # Value Distribution & Exploration
     # -------------------------------------------------------------------------------
@@ -67,7 +61,6 @@ CONFIG: dict[str, Any] = {
     "std_min": 0.001,
     "std_max": 0.4,
     "noise_clip": 0.5,
-
     # -------------------------------------------------------------------------------
     # Algorithm Flags
     # -------------------------------------------------------------------------------
@@ -79,7 +72,6 @@ CONFIG: dict[str, Any] = {
     "amp_dtype": "fp16",
     "disable_bootstrap": False,
     "measure_burnin": 3,
-
     # -------------------------------------------------------------------------------
     # Logging & Checkpointing
     # -------------------------------------------------------------------------------
@@ -238,6 +230,7 @@ class FastTD3EnvWrapper:
         """Map actions from [-1, 1] to the robot's joint-limit range."""
         return (action + 1) / 2 * (self._action_high - self._action_low) + self._action_low
 
+
 def main() -> None:
     GAMMA = float(cfg("gamma"))
     USE_CDQ = bool(cfg("use_cdq"))
@@ -298,7 +291,7 @@ def main() -> None:
         robots=cfg("robots"),
         try_add_table=cfg("add_table", False),
         sim=cfg("sim"),
-        num_envs= 1,
+        num_envs=1,
         headless=True,
         cameras=[
             PinholeCameraCfg(
@@ -430,8 +423,7 @@ def main() -> None:
         frames = [env.render()]
 
         for _ in range(env.max_episode_steps):
-            with torch.no_grad(), autocast(device_type=amp_device_type,
-                                        dtype=amp_dtype, enabled=amp_enabled):
+            with torch.no_grad(), autocast(device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled):
                 act = actor(obs_normalizer(obs))
             obs, _, done, _ = env.step(act.float())
             frames.append(env.render())
@@ -657,6 +649,7 @@ def main() -> None:
         # Close environment and wandb
     envs.close()
     render_with_rollout()
+
 
 if __name__ == "__main__":
     main()
