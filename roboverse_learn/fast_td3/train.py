@@ -279,7 +279,6 @@ def main() -> None:
         iio.mimsave(video_path, frames, fps=30)
         return frames
 
-
     def update_main(data, logs_dict):
         with autocast(device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled):
             observations = data["observations"]
