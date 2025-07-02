@@ -4,75 +4,238 @@ import os
 import random
 import sys
 import time
+from typing import Any
+
+CONFIG: dict[str, Any] = {
+    # -------------------------------------------------------------------------------
+    # Environment
+    # -------------------------------------------------------------------------------
+    "sim": "mjx",
+    "robots": ["h1"],
+    "task": "humanoidbench:Walk",
+    "decimation": 10,
+    "train_or_eval": "train",
+    # -------------------------------------------------------------------------------
+    # Seeds & Device
+    # -------------------------------------------------------------------------------
+    "seed": 1,
+    "cuda": True,
+    "torch_deterministic": True,
+    "device_rank": 0,
+    # -------------------------------------------------------------------------------
+    # Rollout & Timesteps
+    # -------------------------------------------------------------------------------
+    "num_envs": 1024,
+    "num_eval_envs": 1024,
+    "total_timesteps": 1200,
+    "learning_starts": 10,
+    "num_steps": 1,
+    # -------------------------------------------------------------------------------
+    # Replay, Batching, Discounting
+    # -------------------------------------------------------------------------------
+    "buffer_size": 20480,
+    "batch_size": 32768,
+    "gamma": 0.99,
+    "tau": 0.1,
+    # -------------------------------------------------------------------------------
+    # Update Schedule
+    # -------------------------------------------------------------------------------
+    "policy_frequency": 2,
+    "num_updates": 12,
+    # -------------------------------------------------------------------------------
+    # Optimizer & Network
+    # -------------------------------------------------------------------------------
+    "critic_learning_rate": 0.0003,
+    "actor_learning_rate": 0.0003,
+    "weight_decay": 0.1,
+    "critic_hidden_dim": 1024,
+    "actor_hidden_dim": 512,
+    "init_scale": 0.01,
+    "num_atoms": 101,
+    # -------------------------------------------------------------------------------
+    # Value Distribution & Exploration
+    # -------------------------------------------------------------------------------
+    "v_min": -250.0,
+    "v_max": 250.0,
+    "policy_noise": 0.001,
+    "std_min": 0.001,
+    "std_max": 0.4,
+    "noise_clip": 0.5,
+    # -------------------------------------------------------------------------------
+    # Algorithm Flags
+    # -------------------------------------------------------------------------------
+    "use_cdq": True,
+    "compile": True,
+    "obs_normalization": True,
+    "max_grad_norm": 0.0,
+    "amp": True,
+    "amp_dtype": "fp16",
+    "disable_bootstrap": False,
+    "measure_burnin": 3,
+    # -------------------------------------------------------------------------------
+    # Logging & Checkpointing
+    # -------------------------------------------------------------------------------
+    "wandb_project": "get_started_fttd3",
+    "exp_name": "get_started_fttd3",
+    "use_wandb": False,
+    "checkpoint_path": None,
+    "eval_interval": 1200,
+    "save_interval": 1200,
+    "video_width": 1024,
+    "video_height": 1024,
+}
+cfg = CONFIG.get
 
 os.environ["TORCHDYNAMO_INLINE_INBUILT_NN_MODULES"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
-
+if cfg("cuda") and os.environ.get("CUDA_VISIBLE_DEVICES") is None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(cfg("device_rank"))
 if sys.platform != "darwin":
     os.environ["MUJOCO_GL"] = "egl"
 else:
     os.environ["MUJOCO_GL"] = "glfw"
-
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
-# os.environ["JAX_DEFAULT_MATMUL_PRECISION"]          = "highest"
+
+import torch
+
+torch.set_float32_matmul_precision("high")
 
 import numpy as np
 
 try:
-    import isaacgym  # noqa: F401
+    import isaacgym  # noqa: F401 – optional, only if sim == "isaacgym"
 except ImportError:
     pass
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 import tqdm
 import wandb
-import yaml
-from fast_td3 import Actor, Critic
-from fast_td3_utils import EmpiricalNormalization, SimpleReplayBuffer
+from fast_td3 import Actor, Critic, EmpiricalNormalization, SimpleReplayBuffer
 from loguru import logger as log
 from tensordict import TensorDict
+from torch import optim
 from torch.amp import GradScaler, autocast
-from wrapper import FastTD3EnvWrapper
+from torchvision.utils import make_grid
 
 from metasim.cfg.scenario import ScenarioCfg
 from metasim.cfg.sensors import PinholeCameraCfg
+from metasim.constants import SimType
+from metasim.utils.demo_util import get_traj
+from metasim.utils.setup_util import get_sim_env_class
+from metasim.utils.state import list_state_to_tensor
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
-torch.set_float32_matmul_precision("high")
 
+class FastTD3EnvWrapper:
+    def __init__(
+        self,
+        scenario: ScenarioCfg,
+        device: str | torch.device | None = None,
+    ) -> None:
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = torch.device(device)
+        # Build the underlying MetaSim environment
+        EnvironmentClass = get_sim_env_class(SimType(scenario.sim))
+        self.env = EnvironmentClass(scenario)
 
-def load_config_from_yaml(config_name: str) -> dict:
-    """
-    Load configuration from a YAML file.
+        self.num_envs = scenario.num_envs
+        self.robot = scenario.robots[0]
+        self.task = scenario.task
+        # ----------- initial states --------------------------------------------------
+        initial_states, _, _ = get_traj(self.task, self.robot, self.env.handler)
+        # Duplicate / trim list so that its length matches num_envs
+        if len(initial_states) < self.num_envs:
+            k = self.num_envs // len(initial_states)
+            initial_states = initial_states * k + initial_states[: self.num_envs % len(initial_states)]
+        self._initial_states = initial_states[: self.num_envs]
+        if scenario.sim == "mjx":
+            self._initial_states = list_state_to_tensor(self.env.handler, self._initial_states)
+        self.env.reset(states=self._initial_states)
+        states = self.env.handler.get_states()
+        first_obs = self.get_humanoid_observation(states)
+        self.num_obs = first_obs.shape[-1]
+        self._raw_observation_cache = first_obs.clone()
 
-    Args:
-        config_name (str): Name of the YAML config file
+        limits = self.robot.joint_limits  # dict: {joint_name: (low, high)}
+        self.joint_names = self.env.handler.get_joint_names(self.robot.name)
 
-    Returns:
-        dict: The loaded config dictionary
-    """
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(current_dir, "configs", f"{config_name}.yaml")
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-    return config
+        self._action_low = torch.tensor(
+            [limits[j][0] for j in self.joint_names], dtype=torch.float32, device=self.device
+        )
+        self._action_high = torch.tensor(
+            [limits[j][1] for j in self.joint_names], dtype=torch.float32, device=self.device
+        )
+        self.num_actions = self._action_low.shape[0]
+        self.max_episode_steps = self.env.handler.task.episode_length
+        self.asymmetric_obs = False  # privileged critic input not used (for now)
+
+    def reset(self) -> torch.Tensor:
+        self.env.reset(states=self._initial_states)
+        states = self.env.handler.get_states()
+        observation = self.get_humanoid_observation(states)
+        observation = observation.to(self.device)
+        self._raw_observation_cache.copy_(observation)
+        return observation
+
+    def step(self, actions: torch.Tensor):
+        real_action = self._unnormalise_action(actions)
+        states, _, terminated, truncated, _ = self.env.step_actions(real_action)
+
+        obs_now = self.get_humanoid_observation(states).to(self.device)
+        reward_now = self.get_humanoid_reward(states).to(self.device)
+
+        done_flag = terminated.to(self.device, torch.bool)
+        time_out_flag = truncated.to(self.device, torch.bool)
+
+        info = {
+            "time_outs": time_out_flag,
+            "observations": {"raw": {"obs": self._raw_observation_cache.clone().to(self.device)}},
+        }
+
+        if (done_indices := (done_flag | time_out_flag).nonzero(as_tuple=False).squeeze(-1)).numel():
+            self.env.reset(states=self._initial_states, env_ids=done_indices.tolist())
+            reset_states = self.env.handler.get_states()
+            reset_obs_full = self.get_humanoid_observation(reset_states).to(self.device)
+            obs_now[done_indices] = reset_obs_full[done_indices]
+            self._raw_observation_cache[done_indices] = reset_obs_full[done_indices]
+        else:
+            keep_mask = (~done_flag).unsqueeze(-1)
+            self._raw_observation_cache = torch.where(keep_mask, self._raw_observation_cache, obs_now)
+
+        return obs_now, reward_now, done_flag, info
+
+    def render(self) -> None:
+        state = self.env.handler.get_states()
+        rgb_data = next(iter(state.cameras.values())).rgb
+        image = make_grid(rgb_data.permute(0, 3, 1, 2) / 255, nrow=int(rgb_data.shape[0] ** 0.5))  # (C, H, W)
+        image = image.cpu().numpy().transpose(1, 2, 0)  # (H, W, C)
+        image = (image * 255).astype(np.uint8)
+        return image
+
+    def close(self) -> None:
+        self.env.close()
+
+    def get_humanoid_observation(self, states) -> torch.Tensor:
+        """Flatten humanoid states and move them onto the training device."""
+        return self.task.humanoid_obs_flatten_func(states).to(self.device)
+
+    def get_humanoid_reward(self, states) -> torch.Tensor:
+        total_reward = torch.zeros(self.num_envs, device=self.device)
+        for reward_fn, weight in zip(self.task.reward_functions, self.task.reward_weights):
+            total_reward += reward_fn(self.robot.name)(states).to(self.device) * weight
+        return total_reward
+
+    def _unnormalise_action(self, action: torch.Tensor) -> torch.Tensor:
+        """Map actions from [-1, 1] to the robot's joint-limit range."""
+        return (action + 1) / 2 * (self._action_high - self._action_low) + self._action_low
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        log.error("Please provide the config file path, e.g. python train_sb3.py configs/isaacgym.yaml")
-        exit(1)
-    config_name = sys.argv[1]
-    config = load_config_from_yaml(config_name)
-    cfg = config.get
     GAMMA = float(cfg("gamma"))
     USE_CDQ = bool(cfg("use_cdq"))
     MAX_GRAD_NORM = float(cfg("max_grad_norm"))
     DISABLE_BOOTSTRAP = bool(cfg("disable_bootstrap"))
-    log.info(f"Load config: {config_name}")
 
     amp_enabled = cfg("amp") and cfg("cuda") and torch.cuda.is_available()
     amp_device_type = (
@@ -89,7 +252,6 @@ def main() -> None:
     if cfg("use_wandb") and cfg("train_or_eval") == "train":
         wandb.init(
             project=cfg("wandb_project", "fttd3_training"),
-            config=config,
             save_code=True,
         )
 
@@ -107,7 +269,7 @@ def main() -> None:
             device = torch.device(f"mps:{cfg('device_rank')}")
         else:
             raise ValueError("No GPU available")
-    print(f"Using device: {device}")
+    log.info(f"Using device: {device}")
 
     scenario = ScenarioCfg(
         task=cfg("task"),
@@ -129,7 +291,7 @@ def main() -> None:
         robots=cfg("robots"),
         try_add_table=cfg("add_table", False),
         sim=cfg("sim"),
-        num_envs=cfg("num_envs", 1),
+        num_envs=1,
         headless=True,
         cameras=[
             PinholeCameraCfg(
@@ -149,13 +311,8 @@ def main() -> None:
     action_low, action_high = -1.0, 1.0
 
     # ---------------- normalisers -------------------------------------
-
-    if cfg("obs_normalization"):
-        obs_normalizer = EmpiricalNormalization(shape=n_obs, device=device)
-        critic_obs_normalizer = EmpiricalNormalization(shape=n_critic_obs, device=device)
-    else:
-        obs_normalizer = nn.Identity()
-        critic_obs_normalizer = nn.Identity()
+    obs_normalizer = EmpiricalNormalization(shape=n_obs, device=device)
+    critic_obs_normalizer = EmpiricalNormalization(shape=n_critic_obs, device=device)
 
     actor = Actor(
         n_obs=n_obs,
@@ -258,13 +415,13 @@ def main() -> None:
         """
         video_path: str = cfg("video_path", "output/rollout.mp4")
         os.makedirs(os.path.dirname(video_path), exist_ok=True)
-        obs_normalizer.eval()
+
         env = FastTD3EnvWrapper(scenario_render, device=device)
-        # first frame after reset
+
+        obs_normalizer.eval()
         obs = env.reset()
         frames = [env.render()]
 
-        obs_normalizer.eval()
         for _ in range(env.max_episode_steps):
             with torch.no_grad(), autocast(device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled):
                 act = actor(obs_normalizer(obs))
@@ -272,9 +429,10 @@ def main() -> None:
             frames.append(env.render())
             if done.any():
                 break
-        obs_normalizer.train()
-        print(f"[render_with_rollout] MP4 saved to {video_path}")
+
         env.close()
+        obs_normalizer.train()
+
         iio.mimsave(video_path, frames, fps=30)
         return frames
 
@@ -282,12 +440,8 @@ def main() -> None:
         with autocast(device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled):
             observations = data["observations"]
             next_observations = data["next"]["observations"]
-            if envs.asymmetric_obs:
-                critic_observations = data["critic_observations"]
-                next_critic_observations = data["next"]["critic_observations"]
-            else:
-                critic_observations = observations
-                next_critic_observations = next_observations
+            critic_observations = observations
+            next_critic_observations = next_observations
             actions = data["actions"]
             rewards = data["next"]["rewards"]
             dones = data["next"]["dones"].bool()
@@ -350,7 +504,7 @@ def main() -> None:
 
     def update_pol(data, logs_dict):
         with autocast(device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled):
-            critic_observations = data["critic_observations"] if envs.asymmetric_obs else data["observations"]
+            critic_observations = data["observations"]
 
             qf1, qf2 = qnet(critic_observations, actor(data["observations"]))
             qf1_value = qnet.get_value(F.softmax(qf1, dim=1))
@@ -380,16 +534,9 @@ def main() -> None:
         update_pol = torch.compile(update_pol, mode=mode)
         policy = torch.compile(policy, mode=mode)
         normalize_obs = torch.compile(obs_normalizer.forward, mode=mode)
-        normalize_critic_obs = torch.compile(critic_obs_normalizer.forward, mode=mode)
     else:
         normalize_obs = obs_normalizer.forward
-        normalize_critic_obs = critic_obs_normalizer.forward
-
-    if envs.asymmetric_obs:
-        obs, critic_obs = envs.reset_with_critic_obs()
-        critic_obs = torch.as_tensor(critic_obs, device=device, dtype=torch.float)
-    else:
-        obs = envs.reset()
+    obs = envs.reset()
 
     if cfg("checkpoint_path"):
         # Load checkpoint if specified
@@ -421,18 +568,8 @@ def main() -> None:
         next_obs, rewards, dones, infos = envs.step(actions.float())
 
         truncations = infos["time_outs"]
-
-        if envs.asymmetric_obs:
-            next_critic_obs = infos["observations"]["critic"]
-
         # Compute 'true' next_obs and next_critic_obs for saving
         true_next_obs = torch.where(dones[:, None] > 0, infos["observations"]["raw"]["obs"], next_obs)
-        if envs.asymmetric_obs:
-            true_next_critic_obs = torch.where(
-                dones[:, None] > 0,
-                infos["observations"]["raw"]["critic_obs"],
-                next_critic_obs,
-            )
         transition = TensorDict(
             {
                 "observations": obs,
@@ -447,13 +584,7 @@ def main() -> None:
             batch_size=(envs.num_envs,),
             device=device,
         )
-        if envs.asymmetric_obs:
-            transition["critic_observations"] = critic_obs
-            transition["next"]["critic_observations"] = true_next_critic_obs
-
         obs = next_obs
-        if envs.asymmetric_obs:
-            critic_obs = next_critic_obs
 
         rb.extend(transition)
 
@@ -463,9 +594,6 @@ def main() -> None:
                 data = rb.sample(batch_size)
                 data["observations"] = normalize_obs(data["observations"])
                 data["next"]["observations"] = normalize_obs(data["next"]["observations"])
-                if envs.asymmetric_obs:
-                    data["critic_observations"] = normalize_critic_obs(data["critic_observations"])
-                    data["next"]["critic_observations"] = normalize_critic_obs(data["next"]["critic_observations"])
                 logs_dict = update_main(data, logs_dict)
                 if cfg("num_updates") > 1:
                     if i % cfg("policy_frequency") == 1:
@@ -496,12 +624,12 @@ def main() -> None:
                     }
 
                     if cfg("eval_interval") > 0 and global_step % cfg("eval_interval") == 0:
-                        print(f"Evaluating at global step {global_step}")
+                        log.info(f"Evaluating at global step {global_step}")
                         eval_avg_return, eval_avg_length = evaluate()
                         obs = envs.reset()
                         logs["eval_avg_return"] = eval_avg_return
                         logs["eval_avg_length"] = eval_avg_length
-                        print(f"avg_return={eval_avg_return:.4f}, avg_length={eval_avg_length:.4f}")
+                        log.info(f"avg_return={eval_avg_return:.4f}, avg_length={eval_avg_length:.4f}")
 
                 if cfg("use_wandb"):
                     wandb.log(
@@ -514,7 +642,7 @@ def main() -> None:
                     )
 
             if cfg("save_interval") > 0 and global_step > 0 and global_step % cfg("save_interval") == 0:
-                print(f"Saving model at global step {global_step}")
+                log.info(f"Saving model at global step {global_step}")
 
         global_step += 1
         pbar.update(1)
