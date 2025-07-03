@@ -213,10 +213,6 @@ RUN mkdir -p ${HOME}/conda/envs/metasim_isaacgym/lib/python3.8/site-packages/isa
 # =========================================================================================
 # 12. Final Touches
 # =========================================================================================
-RUN echo 'echo "Welcome to the RoboVerse Development Environment!"' >> ${HOME}/.bashrc && \
-    echo 'echo "CUDA 11.8 toolkit with nvcc is available for Curobo compilation."' >> ${HOME}/.bashrc && \
-    echo 'echo "Display environment automatically configured for headless operation."' >> ${HOME}/.bashrc && \
-    echo 'echo "To run IsaacLab examples, run: mamba activate metasim && source /isaac-sim/setup_conda_env.sh && python <your_script.py>"' >> ${HOME}/.bashrc && \
+RUN echo 'echo "To run IsaacLab examples, run: mamba activate metasim && source /isaac-sim/setup_conda_env.sh && python <your_script.py>"' >> ${HOME}/.bashrc && \
     echo 'echo "To run MuJoCo/Genesis/Sapien3/PyBullet examples, run: mamba activate metasim && python <your_script.py>"' >> ${HOME}/.bashrc && \
-    echo 'echo "For GUI apps from host, remember to run: xhost +local:docker on the host."' >> ${HOME}/.bashrc && \
-    echo 'echo "Isaac Gym can be installed manually if needed. See documentation for details."' >> ${HOME}/.bashrc
+    echo 'echo "For GUI apps from host, remember to run: xhost +local:docker on the host."' >> ${HOME}/.bashrc
