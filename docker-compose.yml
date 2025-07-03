@@ -1,29 +1,102 @@
+# =========================================================================================
+# FINAL & DEFINITIVE docker-compose.yml FOR ROBOVERSE
+# This file is designed to work perfectly with the updated Dockerfile.
+# It handles building the image and running the container with all necessary options
+# including Xvfb and OpenGL support for headless operation.
+# =========================================================================================
 services:
   metasim:
-    user: ${DOCKER_UID}:${DOCKER_GID}
+    # This section tells Docker Compose how to build the image.
     build:
       context: .
       dockerfile: Dockerfile
+      # Pass build-time arguments to the Dockerfile.
+      # The NVIDIA_API_KEY will be passed from your shell environment.
       args:
-        - http_proxy=${PROXY}
-        - https_proxy=${PROXY}
+        - NVIDIA_API_KEY
         - DOCKER_UID=${DOCKER_UID:-1000}
         - DOCKER_GID=${DOCKER_GID:-1000}
         - DOCKER_USER=${DOCKER_USER:-user}
+
+    # Assign a consistent name to the container for easy access.
     container_name: metasim
-    privileged: true
+
+    # --- Container Runtime Settings ---
+    # This is crucial for using NVIDIA GPUs inside the container.
     runtime: nvidia
+    privileged: true
+
+    # Environment variables needed by Isaac Sim, GUI forwarding, and headless operation.
     environment:
-      - DISPLAY=${DISPLAY}
-      - LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
-      ## Below is for IsaacSim/IsaacLab Accept EULA, see:
-      ## - https://isaac-sim.github.io/IsaacLab/main/source/deployment/docker.html#running-pre-built-isaac-lab-container
-      ## - https://docs.omniverse.nvidia.com/isaacsim/latest/installation/install_python.html#running-isaac-sim
+      - DISPLAY=:99  # Use virtual display by default
       - ACCEPT_EULA=Y
       - PRIVACY_CONSENT=Y
-      - OMNI_KIT_ACCEPT_EULA=YES
+      # NVIDIA GPU environment variables
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - __GLX_VENDOR_LIBRARY_NAME=nvidia
+      - LIBGL_ALWAYS_INDIRECT=0
+      # Additional OpenGL variables for better compatibility
+      - MESA_GL_VERSION_OVERRIDE=4.5
+      - MESA_GLSL_VERSION_OVERRIDE=450
+
+    # Volume mounts for live code development and GUI forwarding.
     volumes:
-      - /tmp/.X11-unix:/tmp/.X11-unix
-      - /usr/local/cuda:/usr/local/cuda
-      - ./:/home/${DOCKER_USER}/RoboVerse
-    tty: true  # Keeps the container running interactively
+      - ./:/home/${DOCKER_USER:-user}/RoboVerse
+      # X11 socket for GUI forwarding (optional, for when connecting from host display)
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      # Optional: Share host's GPU device files
+      - /dev/dri:/dev/dri:rw
+
+    # Network configuration
+    network_mode: "host"
+
+    # Device access for GPU and display
+    devices:
+      - /dev/dri:/dev/dri
+
+    # --- The Most Important Part: Keep the Container Alive ---
+    # Override the base image's default entrypoint and command.
+    # This prevents the container from exiting immediately after starting.
+    entrypoint: ""
+    command: |
+      bash -c "
+        # Clean up any existing X server files
+        rm -rf /tmp/.X11-unix/X99 /tmp/.X99-lock 2>/dev/null || true
+
+        # Start Xvfb
+        Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset &
+
+        # Wait for Xvfb to start
+        sleep 3
+
+        # Verify Xvfb is running
+        if pgrep -x Xvfb > /dev/null; then
+          echo 'Xvfb started successfully'
+        else
+          echo 'Warning: Xvfb may not have started properly'
+        fi
+
+        # Keep container alive
+        tail -f /dev/null
+      "
+
+    # Health check to ensure services are running (commented out for stability)
+    # healthcheck:
+    #   test: ["CMD", "pgrep", "-x", "Xvfb"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 40s
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Resource limits (optional, adjust based on your system)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
