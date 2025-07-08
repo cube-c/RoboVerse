@@ -1,13 +1,17 @@
 """SkillBlench wrapper for training primitive skill: walking."""
 
-# ruff: noqa: F405
 from __future__ import annotations
 
 import torch
 
 from metasim.cfg.scenario import ScenarioCfg
-from metasim.utils.humanoid_robot_util import *
-from roboverse_learn.skillblender_rl.env_wrappers.base.humanoid_base_wrapper import HumanoidBaseWrapper
+from metasim.utils.humanoid_robot_util import (
+    contact_forces_tensor,
+    dof_pos_tensor,
+    dof_vel_tensor,
+    ref_dof_pos_tenosr,
+)
+from roboverse_learn.skillblender_rl.env_wrappers.base.base_humanoid_wrapper import HumanoidBaseWrapper
 
 
 class WalkingWrapper(HumanoidBaseWrapper):
@@ -18,7 +22,6 @@ class WalkingWrapper(HumanoidBaseWrapper):
     """
 
     def __init__(self, scenario: ScenarioCfg):
-        # TODO check compatibility for other simulators
         super().__init__(scenario)
         self._prepare_ref_indices()
 
@@ -68,12 +71,8 @@ class WalkingWrapper(HumanoidBaseWrapper):
     def _parse_state_for_reward(self, envstate):
         """
         Parse all the states to prepare for reward computation, legged_robot level reward computation.
-        The
-
-        Eg., offset the observation by default obs, compute input rewards.
         """
-        # TODO read from config
-        # parse those state which cannot directly get from Envstates
+
         super()._parse_state_for_reward(envstate)
         self._compute_ref_state()
         self._parse_ref_pos(envstate)
