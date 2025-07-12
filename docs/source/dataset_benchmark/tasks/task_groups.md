@@ -1,7 +1,5 @@
 # Task Group
 
-Notice: This page is under active development. This is a preview version.
-
 ## Maniskill
 
 <table style="table-layout: fixed; width: 100%; border-collapse: collapse; margin-bottom: 24px;">
