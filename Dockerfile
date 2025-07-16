@@ -77,7 +77,7 @@ COPY --chown=${DOCKER_USER} ./pyproject.toml ${HOME}/RoboVerse/pyproject.toml
 WORKDIR ${HOME}/RoboVerse
 
 ########################################################
-## Install isaaclab, mujoco, genesis, sapien3, pybullet
+## Install isaaclab, mujoco, sapien3, pybullet
 ########################################################
 
 ## Create conda environment
@@ -89,7 +89,7 @@ RUN echo "mamba activate metasim" >> ${HOME}/.bashrc
 RUN cd ${HOME}/RoboVerse \
     && eval "$(mamba shell hook --shell bash)" \
     && mamba activate metasim \
-    && uv pip install -e ".[isaaclab,mujoco,genesis,sapien3,pybullet]" \
+    && uv pip install -e ".[isaaclab,mujoco,sapien3,pybullet]" \
     && uv cache clean
 
 # Test proxy connection
@@ -117,6 +117,17 @@ RUN mkdir -p ${HOME}/packages \
 #     && sed -i 's/if platform\.system() == "Linux":/if False:/' source/isaaclab_mimic/setup.py \
 #     && ./isaaclab.sh -i \
 #     && pip cache purge
+
+########################################################
+## Install genesis
+########################################################
+RUN mamba create -n metasim_genesis python=3.10 -y \
+    && mamba clean -a -y
+RUN cd ${HOME}/RoboVerse \
+    && eval "$(mamba shell hook --shell bash)" \
+    && mamba activate metasim_genesis \
+    && uv pip install -e ".[genesis]" \
+    && uv cache clean
 
 ########################################################
 ## Install isaacgym
