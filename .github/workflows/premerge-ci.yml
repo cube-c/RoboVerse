@@ -43,6 +43,7 @@ jobs:
           --subnet-id subnet-0c56793ce29caa78b \
           --output text \
           --query 'Instances[0].InstanceId')
+        echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
 
         echo "Waiting for instance $INSTANCE_ID to be running..."
         aws ec2 wait instance-running \
@@ -55,6 +56,7 @@ jobs:
           --filters "Name=instance-state-name,Values=running" "Name=instance-id,Values=$INSTANCE_ID" \
           --query 'Reservations[*].Instances[*].[PrivateIpAddress]' \
           --output text)
+        echo "EC2_INSTANCE_IP=$EC2_INSTANCE_IP" >> $GITHUB_ENV
 
         echo "Setting up SSH configuration..."
         mkdir -p ~/.ssh
@@ -73,9 +75,6 @@ jobs:
           --availability-zone $AZ \
           --ssh-public-key file://~/.ssh/id_rsa.pub \
           --instance-os-user $EC2_USER_NAME
-
-        echo "EC2_INSTANCE_IP=$EC2_INSTANCE_IP" >> $GITHUB_ENV
-        echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
 
     ############# Build #############
     - name: build
