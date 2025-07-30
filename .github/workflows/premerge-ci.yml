@@ -1,0 +1,98 @@
+name: MetaSim Pre-Merge CI Checks
+
+on:
+  push:  # TODO: remove this when CI/CD is ready
+  merge_group:
+    types: [checks_requested]
+
+env:
+  REGION: us-west-2
+  KEY_NAME: Github_CI_SSH_KEY_PAIR
+  ## DEBUG: choose from the following options
+  ## t2.micro: for quick cpu testing
+  ## g5.xlarge: for GPU test
+  ## g5.2xlarge: for resource-intensive GPU test. TODO: please set as default when CI/CD is ready
+  INSTANCE_TYPE: t2.micro
+  EC2_USER_NAME: ubuntu
+  AZ: us-west-2a
+
+jobs:
+  pre-merge-tests:
+    runs-on: codebuild-EC2_Launcher2-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+    - run: aws --version
+    ############# Prebuild #############
+    - name: pre_build
+      env:
+        SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+      run: |
+        # Get AWS account ID
+        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        if [ -z "$AWS_ACCOUNT_ID" ]; then
+          echo "Error: Failed to get AWS account ID"
+          exit 1
+        fi
+
+        echo "Launching EC2 instance to run tests..."
+        INSTANCE_ID=$(aws ec2 run-instances \
+          --image-id ami-0ec1bf4a8f92e7bd1 \
+          --instance-type $INSTANCE_TYPE \
+          --region $REGION \
+          --key-name $KEY_NAME \
+          --security-group-ids sg-03f9110d8d39282ad \
+          --subnet-id subnet-0c56793ce29caa78b \
+          --output text \
+          --query 'Instances[0].InstanceId')
+
+        echo "Waiting for instance $INSTANCE_ID to be running..."
+        aws ec2 wait instance-running \
+          --instance-ids $INSTANCE_ID \
+          --region $REGION
+
+        echo "Getting instance IP address..."
+        EC2_INSTANCE_IP=$(aws ec2 describe-instances \
+          --region $REGION \
+          --filters "Name=instance-state-name,Values=running" "Name=instance-id,Values=$INSTANCE_ID" \
+          --query 'Reservations[*].Instances[*].[PrivateIpAddress]' \
+          --output text)
+
+        echo "Setting up SSH configuration..."
+        mkdir -p ~/.ssh
+        aws ec2 describe-key-pairs \
+          --include-public-key \
+          --key-name $KEY_NAME \
+          --query 'KeyPairs[0].PublicKey' \
+          --output text > ~/.ssh/id_rsa.pub
+        echo "$SSH_KEY" > ~/.ssh/id_rsa
+        chmod 400 ~/.ssh/id_*
+        echo "Host $EC2_INSTANCE_IP\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n" >> ~/.ssh/config
+
+        echo "Sending SSH public key to instance..."
+        aws ec2-instance-connect send-ssh-public-key \
+          --instance-id $INSTANCE_ID \
+          --availability-zone $AZ \
+          --ssh-public-key file://~/.ssh/id_rsa.pub \
+          --instance-os-user $EC2_USER_NAME
+
+        echo "EC2_INSTANCE_IP=$EC2_INSTANCE_IP" >> $GITHUB_ENV
+        echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+
+    ############# Build #############
+    - name: build
+      run: |
+        echo "Running tests on EC2 instance..."
+        ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no $EC2_USER_NAME@$EC2_INSTANCE_IP "
+          # TODO: add test scripts here
+          echo hello_world
+          curl google.com
+        " || { echo "Test execution failed"; exit 1; }
+
+    ############# Postbuild #############
+    - name: post_build
+      if: always()  # always try to terminate the instance
+      run: |
+        echo "Cleaning up resources..."
+        if [ ! -z "$INSTANCE_ID" ]; then
+            echo "Terminating EC2 instance $INSTANCE_ID..."
+            aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region $REGION || true
+        fi
