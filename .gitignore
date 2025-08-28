@@ -35,6 +35,7 @@ _isaac_sim
 ppo_logs/
 legacy/
 =0.26.0
+core
 
 # Data
 /assets
