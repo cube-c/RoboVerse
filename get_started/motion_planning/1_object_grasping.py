@@ -13,6 +13,11 @@ except ImportError:
     pass
 
 import os
+# import getpass
+
+# user = getpass.getuser()  # Safe way to get current username
+# os.environ["XDG_RUNTIME_DIR"] = f"/tmp/{user}-runtime"
+# os.makedirs(os.environ["XDG_RUNTIME_DIR"], exist_ok=True)
 
 import numpy as np
 import rootutils
@@ -149,6 +154,20 @@ def get_point_cloud_from_obs(obs, save_pcd=False):
     """Get the point cloud from the observation."""
     img = obs.cameras["camera0"].rgb
     depth = obs.cameras["camera0"].depth
+    ########################################################################
+    # save img and depth as png
+    # from PIL import Image
+    # os.makedirs("get_started/output/motion_planning", exist_ok=True)
+    # print(f"img shape: {img.shape}, depth shape: {depth.shape}")
+    # img_path = "get_started/output/motion_planning/img.png"
+    # depth_path = "get_started/output/motion_planning/depth.png"
+    # max_depth = np.max(depth[0].cpu().numpy())
+    # depth /= max_depth * 255.0 # normalize depth to [0, 1]
+    # img = Image.fromarray(img[0].cpu().numpy())
+    # depth = Image.fromarray((depth[0].squeeze(-1).cpu().numpy() / max_depth * 255.0).astype('uint8'))
+    # img.save(img_path)
+    # depth.save(depth_path)
+    #######################################################################
     extr, intr = get_cam_params(
         cam_pos=torch.tensor([scenario.cameras[i].pos for i in range(len(scenario.cameras))]),
         cam_look_at=torch.tensor([scenario.cameras[i].look_at for i in range(len(scenario.cameras))]),
@@ -158,7 +177,8 @@ def get_point_cloud_from_obs(obs, save_pcd=False):
         horizontal_aperture=scenario.cameras[0].horizontal_aperture,
     )
 
-    pcd = get_pcd_from_rgbd(-depth.cpu()[0], img.cpu()[0], intr[0], extr[0])
+    pcd = get_pcd_from_rgbd(depth.cpu()[0], img.cpu()[0], intr[0], extr[0])
+    # print(pcd)
     if save_pcd:
         convert_to_ply(np.array(pcd.points), "get_started/output/motion_planning.ply")
     return pcd
@@ -181,6 +201,7 @@ def move_to_pose(
     actions = [
         {"dof_pos_target": dict(zip(robot.actuators.keys(), q[i_env].tolist()))} for i_env in range(scenario.num_envs)
     ]
+    # print(actions)
     for i in range(steps):
         obs, reward, success, time_out, extras = env.step(actions)
         obs_saver.add(obs)
@@ -199,6 +220,7 @@ for step in range(1):
     pcd = get_point_cloud_from_obs(obs)
 
     points = np.array(pcd.points)
+    # print("points shape:", points.shape)
     colors = np.array(pcd.colors)
     # do not consider the arm points
     # point_mask= points[:,2] <= 0.1

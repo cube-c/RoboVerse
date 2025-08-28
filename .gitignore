@@ -34,6 +34,7 @@ Open6DOR
 _isaac_sim
 ppo_logs/
 legacy/
+=0.26.0
 
 # Data
 /assets
@@ -59,9 +60,18 @@ RoboVerseOld
 RoboVersePage
 RoboVerseLearn
 
+# Old Backup files
+my-files-backup/
+old-backups/
+roboverse_data_old/
+
 # Third Party Repos
 orbit
 IsaacLab
+GraspMolmo/
+LIBERO/
+M2T2/
+
 
 *.log
 _data

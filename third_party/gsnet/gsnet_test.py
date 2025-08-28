@@ -4,16 +4,26 @@ import numpy as np
 import time
 import torch
 import open3d as o3d
+# import open3d.visualization.rendering as rendering
+from open3d.visualization.rendering import OffscreenRenderer, MaterialRecord, Camera
+
 # from graspnetAPI.graspnet_eval import GraspGroup
 from graspnetAPI import GraspGroup, Grasp
 import rootutils
+import getpass
 
+# user = getpass.getuser()  # Safe way to get current username
+# os.environ["XDG_RUNTIME_DIR"] = f"/tmp/{user}-runtime"
+# os.makedirs(os.environ["XDG_RUNTIME_DIR"], exist_ok=True)
 rootutils.setup_root(__file__, pythonpath=True)
 
 from third_party.gsnet.models.graspnet import GraspNet, pred_decode
 from third_party.gsnet.dataset.graspnet_dataset import minkowski_collate_fn
 from third_party.gsnet.utils.collision_detector import ModelFreeCollisionDetector, FrankaCollisionDetector
 # from data_utils import CameraInfo, create_point_cloud_from_depth_image, get_workspace_mask
+
+# o3d.visualization.webrtc_server.enable_webrtc()
+# o3d.visualization.rendering.OffscreenRenderer(640, 480)
 
 class GSNet():
     def __init__(self):
@@ -66,9 +76,9 @@ class GSNet():
         net.to(device)
 
         # Load checkpoint
-        checkpoint = torch.load(self.cfgs.checkpoint_path)
+        checkpoint = torch.load(self.cfgs.checkpoint_path, weights_only=True)
         net.load_state_dict(checkpoint['model_state_dict'])
-        start_epoch = checkpoint['epoch']
+        # start_epoch = checkpoint['epoch']  # Comment out since we're using weights_only=True
         # print("-> loaded checkpoint %s (epoch: %d)" % (cfgs.checkpoint_path, start_epoch))
 
         net.eval()
@@ -115,13 +125,55 @@ class GSNet():
 
         return gg
 
-    def visualize(self, cloud, gg: GraspGroup = None, g: Grasp = None):
-        # pcd = o3d.geometry.PointCloud()
-        # pcd.points = o3d.utility.Vector3dVector(cloud)
+    def visualize(self, cloud, gg: GraspGroup = None, g: Grasp = None, image_only=False):
+        """This function is used to visualize the grasp group or grasp."""
         pcd = cloud
+        if image_only:
+            # save image
+            points = np.asarray(pcd.points)
+            rotation = np.array([[0, 1, 0], [0, 0, -1], [-1, 0, 0]])
+            rotation_along_x = np.array([[1, 0, 0], [0, np.cos(70), -np.sin(70)], [0, np.sin(70), np.cos(70)]])
+            rotation = rotation_along_x @ rotation
+            points = points @ rotation.T
+            pcd.points = o3d.utility.Vector3dVector(points)
+
+            vis = o3d.visualization.Visualizer()
+            vis.create_window(visible=False)  # Set to False for SSH/headless
+            vis.add_geometry(pcd)
+            if gg is not None:
+                grippers = gg.to_open3d_geometry_list()
+                # Add each gripper individually
+                for i, gripper in enumerate(grippers):
+                    # if i == 0:  # Only transform the first gripper for visualization
+                    vertices = np.asarray(gripper.vertices)
+                    vertices = vertices @ rotation.T
+                    gripper.vertices = o3d.utility.Vector3dVector(vertices)
+                    vis.add_geometry(gripper)
+            elif g is not None:
+                gripper = g.to_open3d_geometry()
+                vertices = np.asarray(gripper.vertices)
+                vertices = vertices @ rotation.T
+                gripper.vertices = o3d.utility.Vector3dVector(vertices)
+                vis.add_geometry(gripper)
+
+            vis.poll_events()
+            vis.update_renderer()
+
+            image = vis.capture_screen_float_buffer()
+            import imageio
+            image = np.asarray(image)
+
+            # Ensure directory exists
+            os.makedirs("get_started/output/motion_planning", exist_ok=True)
+            imageio.imwrite("get_started/output/motion_planning/gsnet_visualization_test.png", (image * 255).astype(np.uint8))
+            vis.destroy_window()
+            return
+
+        # Original GUI visualization (for non-SSH environments)
         if gg is not None:
             grippers = gg.to_open3d_geometry_list()
-            o3d.visualization.draw_geometries([pcd, *grippers])
+            geometries = [pcd] + grippers
+            o3d.visualization.draw_geometries(geometries)
         elif g is not None:
             gripper = g.to_open3d_geometry()
             o3d.visualization.draw_geometries([pcd, gripper])
@@ -130,9 +182,17 @@ class GSNet():
 
 if __name__ == '__main__':
     import open3d as o3d
-    # try:
-    cloud = o3d.io.read_point_cloud(f"third_party/gsnet/assets/test.ply")
+    try:
+        cloud = o3d.io.read_point_cloud(f"third_party/gsnet/assets/test.ply")
+        print(f"Loaded point cloud with {len(cloud.points)} points")
 
-    gsnet = GSNet()
-    gg = gsnet.inference(np.array(cloud.points))
-    gsnet.visualize(cloud, gg)
+        gsnet = GSNet()
+        gg = gsnet.inference(np.array(cloud.points))
+        print(f"Generated {len(gg)} grasps")
+
+        gsnet.visualize(cloud, gg, image_only=True)
+        print("Visualization saved successfully")
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()

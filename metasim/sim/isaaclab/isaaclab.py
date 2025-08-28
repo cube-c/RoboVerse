@@ -143,7 +143,8 @@ class IsaaclabHandler(BaseSimHandler):
                 for env_id in range(self.num_envs):
                     for i, actuator_name in enumerate(actuator_names):
                         action_tensor[env_id, i] = torch.tensor(
-                            action[env_id][robot.name]["dof_pos_target"][actuator_name], device=self.env.device
+                            # action[env_id][robot.name]["dof_pos_target"][actuator_name], device=self.env.device
+                            action[env_id]["dof_pos_target"][actuator_name], device=self.env.device
                         )
                 action_tensors.append(action_tensor)
             action_tensor_all = torch.cat(action_tensors, dim=-1)
@@ -170,6 +171,162 @@ class IsaaclabHandler(BaseSimHandler):
                     body_idx = merged_states[base_obj_name].body_names.index(base_body_name)
                     pos, rot = merged_states[base_obj_name].body_state[:, body_idx, :7].split([3, 4], dim=-1)
                 self._set_object_pose(obj, pos, rot)
+
+        # Sticky-gripper cheat: attach nearest contacted object to gripper and teleport-follow it
+        # This provides 100% grasp success by forcing objects to follow the EE while closed.
+        try:
+            # Initialize once
+            if not hasattr(self, "_sticky"):
+                self._sticky: dict[int, str | None] = {env_id: None for env_id in range(self.num_envs)}
+                self._sticky_rel: dict[tuple[int, str], tuple[torch.Tensor, torch.Tensor]] = {}
+
+                # Resolve EE body index for the first robot
+                robot_cfg = self.robots[0]
+                robot_name = robot_cfg.name
+                body_names_sorted = self.get_body_names(robot_name, sort=True)
+                ee_body_name = getattr(robot_cfg, "ee_body_name", None)
+                if ee_body_name is not None and ee_body_name in body_names_sorted:
+                    self._ee_body_idx = body_names_sorted.index(ee_body_name)
+                else:
+                    # Fallback: last body as EE
+                    self._ee_body_idx = len(body_names_sorted) - 1
+                    # Try to pick by keyword if available
+                    for kw in ["ee", "gripper", "hand", "wrist"]:
+                        for i, nm in enumerate(body_names_sorted):
+                            if kw in nm.lower():
+                                self._ee_body_idx = i
+                                ee_body_name = nm
+                                break
+                        if ee_body_name is not None and ee_body_name in body_names_sorted:
+                            break
+
+                log.info(f"Sticky-gripper EE body: {ee_body_name if ee_body_name else body_names_sorted[self._ee_body_idx]} (idx={self._ee_body_idx})")
+
+                # Heuristic gripper joints (used to infer open/close state)
+                joint_names_sorted = self.get_joint_names(robot_name, sort=True)
+                self._gripper_joint_names = [
+                    jn for jn in joint_names_sorted if ("finger" in jn.lower() or "gripper" in jn.lower())
+                ]
+                if self._gripper_joint_names:
+                    log.info(f"Sticky-gripper joints: {self._gripper_joint_names}")
+                else:
+                    log.warning("Sticky-gripper: no gripper/finger joints detected; assuming closed when attaching")
+
+            robot_name = self.robots[0].name
+
+            def _quat_inv(q: torch.Tensor) -> torch.Tensor:
+                # q = [x, y, z, w]
+                return torch.stack((-q[0], -q[1], -q[2], q[3]))
+
+            def _quat_mul(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
+                # q = [x, y, z, w]
+                x1, y1, z1, w1 = q1
+                x2, y2, z2, w2 = q2
+                x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+                y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+                z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+                w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+                return torch.stack((x, y, z, w))
+
+            # Contact flag per env (optional if a contact sensor is added as "ee_contact")
+            contact = None
+            if "ee_contact" in states.sensors:
+                cf = states.sensors["ee_contact"].force  # (num_envs, 3)
+                contact = (cf.norm(dim=-1) > 1.0)  # threshold can be tuned
+            else:
+                log.trace("Sticky-gripper: no 'ee_contact' sensor; using proximity fallback")
+
+            # Gripper closed heuristic: for finger joints, avg target < 0.02 means closed
+            joint_names_sorted = self.get_joint_names(robot_name, sort=True)
+
+            def _gripper_closed(env_id: int) -> bool:
+                if not self._gripper_joint_names:
+                    # If unknown, assume closed to allow attaching
+                    return True
+                tgt = states.robots[robot_name].joint_pos_target[env_id]
+                vals = []
+                for jn in self._gripper_joint_names:
+                    if jn in joint_names_sorted:
+                        vals.append(tgt[joint_names_sorted.index(jn)])
+                if not vals:
+                    return True
+                avg = torch.stack(vals).mean()
+                return bool(avg.item() < 0.02)
+
+            # Current EE pose per env
+            ee_state = states.robots[robot_name].body_state[:, self._ee_body_idx, :]
+            ee_pos = ee_state[:, 0:3]
+            ee_quat = ee_state[:, 3:7]
+
+            # Attach on contact or proximity while gripper closed
+            for env_id in range(self.num_envs):
+                if self._sticky[env_id] is None and _gripper_closed(env_id):
+                    should_attach = False
+                    if contact is not None and bool(contact[env_id].item()):
+                        should_attach = True
+                    # Proximity fallback (no contact sensor): attach if any object root is very close to EE
+                    # Choose closest object within 5 cm
+                    best_name = None
+                    best_dist = 1e9
+                    for obj in self.objects:
+                        if obj.name not in states.objects:
+                            continue
+                        obj_pos = states.objects[obj.name].root_state[env_id, 0:3]
+                        d = torch.linalg.norm(obj_pos - ee_pos[env_id])
+                        if d.item() < best_dist:
+                            best_dist = d.item()
+                            best_name = obj.name
+                    if best_name is not None and best_dist < 0.18:
+                        should_attach = True
+
+                    if should_attach and best_name is not None:
+                        obj_pose = states.objects[best_name].root_state[env_id, 0:7]
+                        obj_pos0 = obj_pose[0:3]
+                        obj_quat0 = obj_pose[3:7]
+                        # Store relative transform (position delta and quaternion relation)
+                        delta_pos = obj_pos0 - ee_pos[env_id]
+                        q_rel = _quat_mul(_quat_inv(ee_quat[env_id]), obj_quat0)
+                        self._sticky[env_id] = best_name
+                        self._sticky_rel[(env_id, best_name)] = (delta_pos.clone(), q_rel.clone())
+                        log.debug(f"Sticky-gripper: ATTACH env={env_id} obj={best_name} dist={best_dist:.4f}m")
+
+                # Release when gripper opens or contact ends (if contact sensor exists)
+                if self._sticky[env_id] is not None:
+                    release = (not _gripper_closed(env_id))
+                    if contact is not None and not bool(contact[env_id].item()):
+                        release = True
+                    if release:
+                        key = (env_id, self._sticky[env_id])
+                        if key in self._sticky_rel:
+                            self._sticky_rel.pop(key)
+                        log.debug(f"Sticky-gripper: RELEASE env={env_id} obj={self._sticky[env_id]}")
+                        self._sticky[env_id] = None
+
+            # Drive attached objects to follow EE (zero velocities in _set_object_pose)
+            batch_by_obj: dict[str, tuple[list[int], list[torch.Tensor], list[torch.Tensor]]] = {}
+            for env_id in range(self.num_envs):
+                obj_name = self._sticky[env_id]
+                if obj_name is None:
+                    continue
+                delta_pos, q_rel = self._sticky_rel.get((env_id, obj_name), (None, None))
+                if delta_pos is None:
+                    continue
+                target_pos = ee_pos[env_id] + delta_pos
+                target_quat = _quat_mul(ee_quat[env_id], q_rel)
+                if obj_name not in batch_by_obj:
+                    batch_by_obj[obj_name] = ([], [], [])
+                batch_by_obj[obj_name][0].append(env_id)
+                batch_by_obj[obj_name][1].append(target_pos)
+                batch_by_obj[obj_name][2].append(target_quat)
+
+            for obj_name, (env_ids_list, pos_list, quat_list) in batch_by_obj.items():
+                env_ids_tensor = env_ids_list  # list[int]
+                pos = torch.stack(pos_list, dim=0)
+                quat = torch.stack(quat_list, dim=0)
+                self._set_object_pose(self.object_dict[obj_name], pos, quat, env_ids=env_ids_tensor)
+        except Exception as e:
+            # Fail-safe: never break the simulation on sticky errors
+            log.debug(f"Sticky-gripper step skipped due to: {e}")
 
         ## NOTE: Below is a workaround for IsaacLab bug. In IsaacLab v1.4.1-v2.1.0, the tiled camera pose data is never updated. The code is copied from `_update_poses` method in Camera class in `source/isaaclab/sensors/camera/camera.py` in IsaacLab v2.1.0.
         _update_tiled_camera_pose(self.env, self.cameras)

@@ -119,10 +119,10 @@ class RelativeBboxDetector(BaseDetector):
             (obj_pos_checker_local < self.checker_upper.unsqueeze(0))
             & (obj_pos_checker_local > self.checker_lower.unsqueeze(0))
         ).all(dim=-1)
-        log.debug(
-            f"Object {obj_name} local position in checker based on {self.base_obj_name}:"
-            f" {tensor_to_str(obj_pos_checker_local)}"
-        )
+        # log.debug(
+        #     f"Object {obj_name} local position in checker based on {self.base_obj_name}:"
+        #     f" {tensor_to_str(obj_pos_checker_local)}"
+        # )
         return object_in_checker
 
     def get_debug_viewers(self) -> list[BaseObjCfg]:

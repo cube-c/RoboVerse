@@ -78,7 +78,7 @@ def batch_viewpoint_params_to_matrix(batch_towards, batch_angle):
                 approach vectors in batch
             batch_angle: [torch.floatTensor, (N,)]
                 in-plane rotation angles in batch
-                
+
         Output:
             batch_matrix: [torch.floatTensor, (N,3,3)]
                 rotation matrices in batch

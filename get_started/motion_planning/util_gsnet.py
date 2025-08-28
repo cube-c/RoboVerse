@@ -62,7 +62,7 @@ class GSNet:
         net.to(device)
 
         # Load checkpoint
-        checkpoint = torch.load(self.checkpoint_path)
+        checkpoint = torch.load(self.checkpoint_path, weights_only=True)
         net.load_state_dict(checkpoint["model_state_dict"])
         # start_epoch = checkpoint["epoch"]
         # print("-> loaded checkpoint %s (epoch: %d)" % (cfgs.checkpoint_path, start_epoch))
@@ -105,26 +105,86 @@ class GSNet:
 
         return gg
 
-    def visualize(self, cloud, gg: GraspGroup = None, g: Grasp = None, image_only=False):
+    def visualize(self, cloud, gg: GraspGroup = None, g: Grasp = None, image_only=False, filename=None, save_dir=""):
         """This function is used to visualize the grasp group or grasp."""
         pcd = cloud
         if image_only:
             # save image
             points = np.asarray(pcd.points)
+
+            # along to x-axis
             rotation = np.array([[0, 1, 0], [0, 0, -1], [-1, 0, 0]])
-            rotation_along_x = np.array([[1, 0, 0], [0, np.cos(70), -np.sin(70)], [0, np.sin(70), np.cos(70)]])
-            rotation = rotation_along_x @ rotation
+            rotation_tilt = np.array([[1, 0, 0], [0, np.cos(70), -np.sin(70)], [0, np.sin(70), np.cos(70)]])
+
+            # along to -x-axis
+            # rotation = np.array([
+            #     [0, 0, -1],
+            #     [1, 0, 0],
+            #     [0, 1, 0]
+            # ])
+            # # Optional: tilt the view by 70 degrees around the x axis
+            # theta = np.deg2rad(70)
+            # rotation_tilt = np.array([
+            #     [1, 0, 0],
+            #     [0, np.cos(theta), -np.sin(theta)],
+            #     [0, np.sin(theta), np.cos(theta)]
+            # ])
+
+            # along to y-axis
+            # rotation = np.array([[0, 1, 0], [0, 0, -1], [-1, 0, 0]])
+            # # Optional: tilt the view by 70 degrees around the y axis
+            # theta = np.deg2rad(70)
+            # rotation_tilt = np.array([
+            #     [np.cos(theta), 0, np.sin(theta)],
+            #     [0, 1, 0],
+            #     [-np.sin(theta), 0, np.cos(theta)]
+            # ])
+
+            # along to z-axis
+            # rotation = np.eye(3)
+            # # Optional: tilt the view by 70 degrees around the x axis
+            # theta = np.deg2rad(70)
+            # rotation_tilt = np.array([
+            #     [1, 0, 0],
+            #     [0, np.cos(theta), -np.sin(theta)],
+            #     [0, np.sin(theta), np.cos(theta)]
+            # ])
+
+            # along to -z-axis
+            # rotation = np.array([
+            #     [1, 0, 0],
+            #     [0, 1, 0],
+            #     [0, 0, -1]
+            # ])
+            # # Optional: tilt the view by 70 degrees around the x axis
+            # theta = np.deg2rad(70)
+            # rotation_tilt = np.array([
+            #     [1, 0, 0],
+            #     [0, np.cos(theta), -np.sin(theta)],
+            #     [0, np.sin(theta), np.cos(theta)]
+            # ])
+
+            rotation = rotation_tilt @ rotation
             points = points @ rotation.T
             pcd.points = o3d.utility.Vector3dVector(points)
 
             vis = o3d.visualization.Visualizer()
-            vis.create_window(visible=True)
+            vis.create_window(visible=False)
+            # downpcd = pcd.voxel_down_sample(voxel_size=0.01)
             vis.add_geometry(pcd)
             grippers = gg.to_open3d_geometry_list()
-            vertices = np.asarray(grippers[0].vertices)
-            vertices = vertices @ rotation.T
-            grippers[0].vertices = o3d.utility.Vector3dVector(vertices)
-            vis.add_geometry(*grippers)
+            # Add each gripper individually
+            for i, gripper in enumerate(grippers):
+                # if i == 0:  # Only transform the first gripper for visualization
+                vertices = np.asarray(gripper.vertices)
+                vertices = vertices @ rotation.T
+                gripper.vertices = o3d.utility.Vector3dVector(vertices)
+                vis.add_geometry(gripper)
+
+            # vertices = np.asarray(grippers[0].vertices)
+            # vertices = vertices @ rotation.T
+            # grippers[0].vertices = o3d.utility.Vector3dVector(vertices)
+            # vis.add_geometry(*grippers)
             vis.poll_events()
             vis.update_renderer()
 
@@ -133,7 +193,7 @@ class GSNet:
 
             image = np.asarray(image)
             imageio.imwrite(
-                "get_started/output/motion_planning/gsnet_visualization.png", (image * 255).astype(np.uint8)
+                f"get_started/output/motion_planning/{save_dir}/{filename}_gsnet_visualization.png", (image * 255).astype(np.uint8)
             )
             vis.destroy_window()
             return
