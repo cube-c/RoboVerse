@@ -20,6 +20,7 @@ roboverse_data_dev/
 roboverse_data_dev
 roboverse_data_release/
 roboverse_data_release
+roboverse_data_old
 *.pth
 checkpoints
 slurm.sh
@@ -34,6 +35,8 @@ Open6DOR
 _isaac_sim
 ppo_logs/
 legacy/
+
+metasim_latest_in_main_0828
 
 # Data
 /assets
@@ -60,6 +63,10 @@ RoboVersePage
 RoboVerseLearn
 
 # Third Party Repos
+GraspMolmo
+LIBERO
+M2T2
+
 orbit
 IsaacLab
 

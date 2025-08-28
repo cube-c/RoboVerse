@@ -31,7 +31,8 @@ class ObsSaver:
             return
 
         try:
-            rgb_data = torch.concat([cam.rgb for cam in state.cameras.values()], dim=2)  # horizontal concat
+            # rgb_data = torch.concat([cam.rgb for cam in state.cameras.values()], dim=2)  # horizontal concat
+            rgb_data = next(iter(state.cameras.values())).rgb
             image = make_grid(rgb_data.permute(0, 3, 1, 2) / 255, nrow=int(rgb_data.shape[0] ** 0.5))  # (C, H, W)
         except Exception as e:
             log.error(f"Error adding observation: {e}")
@@ -72,11 +73,27 @@ def get_pcd_from_rgbd(depth, rgb_img, cam_intr_mat, cam_extr_mat):
     if type(cam_extr_mat) is not np.ndarray:
         cam_extr_mat = np.array(cam_extr_mat)
 
+    # print(depth.squeeze(-1).shape)
+    # redwood_rgbd = o3d.data.SampleRedwoodRGBDImages()
+    # color_raw = o3d.io.read_image(redwood_rgbd.color_paths[0])
+    # depth_raw = o3d.io.read_image(redwood_rgbd.depth_paths[0])
+    # rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
+    #     color_raw, depth_raw)
+    # print(rgbd_image)
+    # print(f"color_raw: {color_raw.shape}, depth_raw: {depth_raw.shape}")
+    # o3d.io.write_image("example_rgbd_color.png", rgbd_image.color)
+    # o3d.io.write_image("example_rgbd_depth_updated.png", rgbd_image.depth)
     depth_o3d = o3d.geometry.Image(np.ascontiguousarray(depth).astype(np.float32))
+    # depth_mm = (np.asarray(depth.squeeze(-1)) * 1000).astype(np.uint16)
+    # depth_o3d = o3d.geometry.Image(np.ascontiguousarray(depth_mm))
     rgb_o3d = o3d.geometry.Image(np.ascontiguousarray(rgb_img).astype(np.uint8))
     rgbd_o3d = o3d.geometry.RGBDImage.create_from_color_and_depth(
         rgb_o3d, depth_o3d, depth_scale=1.0, convert_rgb_to_intensity=False
     )
+    # save rgbd_o3d to file
+    # print(f"rgbd_o3d: {rgbd_o3d}")
+    # o3d.io.write_image("rgbd_color.png", rgbd_o3d.color)
+    # o3d.io.write_image("rgbd_depth_updated.png", rgbd_o3d.depth)
 
     cam_intr = o3d.camera.PinholeCameraIntrinsic(
         width=depth.shape[1],
@@ -88,6 +105,7 @@ def get_pcd_from_rgbd(depth, rgb_img, cam_intr_mat, cam_extr_mat):
     )
     cam_extr = np.array(cam_extr_mat)
 
+    # print(rgbd_o3d, cam_intr, cam_extr)
     pcd = o3d.geometry.PointCloud.create_from_rgbd_image(
         rgbd_o3d,
         cam_intr,
