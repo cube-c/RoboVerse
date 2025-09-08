@@ -1,12 +1,17 @@
 """This module provides utility functions for kinematics calculations using the curobo library."""
 
 import torch
+import numpy as np
+import open3d as o3d
+from loguru import logger as log
 from curobo.cuda_robot_model.cuda_robot_model import CudaRobotModel
-from curobo.geom.types import Cuboid, WorldConfig
+from curobo.geom.types import Cuboid, WorldConfig, PointCloud, Mesh
 from curobo.types.base import TensorDeviceType
 from curobo.types.robot import RobotConfig
 from curobo.util_file import get_robot_path, join_path, load_yaml
 from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
+from curobo.wrap.reacher.trajopt import TrajOptSolver, TrajOptSolverConfig
+
 
 from metasim.cfg.robots.base_robot_cfg import BaseRobotCfg
 from metasim.utils.math import matrix_from_quat
@@ -57,6 +62,63 @@ def get_curobo_models(robot_cfg: BaseRobotCfg, no_gnd=False):
         return robot_state.ee_position, robot_state.ee_quaternion
 
     return kin_model, do_fk, ik_solver
+
+
+# Editing code based on https://github.com/NVlabs/curobo/blob/ebb71702f3f70e767f40fd8e050674af0288abe8/tests/ik_test.py#L61
+# I'm not sure yet...
+# Q. do we have to find out collsion-free ik for "each" grasp pose?
+# If a grasp pose is impossible to be a collision-free, then we might move on to the next possible pose
+def get_curobo_models_with_pcd(pcd: o3d.geometry.PointCloud, robot_cfg: BaseRobotCfg):
+    """Initializes and returns the curobo kinematic model, forward kinematics function, and inverse kinematics solver for a given robot configuration.
+
+    Args:
+        robot_cfg (BaseRobotCfg): The configuration object for the robot.
+        no_gnd (bool, optional): If True, the ground plane is not included for curobo collision checking. Defaults to False.
+
+    Returns:
+        tuple: A tuple containing:
+            - kin_model (CudaRobotModel): The kinematic model of the robot.
+            - do_fk (function): A function that performs forward kinematics given joint positions.
+            - ik_solver (IKSolver): The inverse kinematics solver configured for the robot.
+    """
+    tensor_args = TensorDeviceType()
+    config_file = load_yaml(join_path(get_robot_path(), robot_cfg.curobo_ref_cfg_name))["robot_cfg"]
+    curobo_robot_cfg = RobotConfig.from_dict(config_file, tensor_args)
+    world_cfg = WorldConfig(
+        cuboid=[
+            Cuboid(
+                name="ground",
+                pose=[0.0, 0.0, -0.4, 1.0, 0.0, 0.0, 0.0],
+                dims=[10.0, 10.0, 0.8],
+            ),
+        ],
+        # TODO: is there any better method (using nvblox?)
+        # TODO: get robot position and quaternion from args and apply to mesh pose
+        mesh=[Mesh.from_pointcloud(np.asarray(pcd.points), pose=[1.15, 0.0, 0.0, 0, 0, 0, 1], pitch=0.005)],
+    )
+    world_cfg.save_world_as_mesh("get_started/output/motion_planning/3_object_grasping_vlm/world.ply")
+    ik_config = IKSolverConfig.load_from_robot_config(
+        curobo_robot_cfg,
+        world_cfg,
+        rotation_threshold=0.05,
+        position_threshold=0.005,
+        collision_activation_distance=0.001,
+        num_seeds=20,
+        self_collision_check=True,
+        self_collision_opt=True,
+        tensor_args=tensor_args,
+        use_cuda_graph=True,
+    )
+
+    ik_solver = IKSolver(ik_config)
+    kin_model = CudaRobotModel(curobo_robot_cfg.kinematics)
+
+    def do_fk(q: torch.Tensor):
+        robot_state = kin_model.get_state(q, config_file["kinematics"]["ee_link"])
+        return robot_state.ee_position, robot_state.ee_quaternion
+
+    return kin_model, do_fk, ik_solver
+
 
 
 def ee_pose_from_tcp_pose(robot_cfg: BaseRobotCfg, tcp_pos: torch.Tensor, tcp_quat: torch.Tensor):

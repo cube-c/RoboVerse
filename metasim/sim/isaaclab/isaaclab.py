@@ -172,6 +172,7 @@ class IsaaclabHandler(BaseSimHandler):
                     pos, rot = merged_states[base_obj_name].body_state[:, body_idx, :7].split([3, 4], dim=-1)
                 self._set_object_pose(obj, pos, rot)
 
+        """
         # Sticky-gripper cheat: attach nearest contacted object to gripper and teleport-follow it
         # This provides 100% grasp success by forcing objects to follow the EE while closed.
         try:
@@ -327,6 +328,7 @@ class IsaaclabHandler(BaseSimHandler):
         except Exception as e:
             # Fail-safe: never break the simulation on sticky errors
             log.debug(f"Sticky-gripper step skipped due to: {e}")
+        """
 
         ## NOTE: Below is a workaround for IsaacLab bug. In IsaacLab v1.4.1-v2.1.0, the tiled camera pose data is never updated. The code is copied from `_update_poses` method in Camera class in `source/isaaclab/sensors/camera/camera.py` in IsaacLab v2.1.0.
         _update_tiled_camera_pose(self.env, self.cameras)

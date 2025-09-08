@@ -50,7 +50,7 @@ from metasim.cfg.sensors import PinholeCameraCfg
 from metasim.constants import PhysicStateType, SimType
 from metasim.utils import configclass
 from metasim.utils.camera_util import get_cam_params
-from metasim.utils.kinematics_utils import get_curobo_models
+from metasim.utils.kinematics_utils import get_curobo_models, get_curobo_models_with_pcd
 from metasim.utils.setup_util import get_sim_env_class, get_robot, get_task
 
 from metasim.utils.demo_util import get_traj
@@ -336,18 +336,16 @@ robot = scenario.robots[0]
 robot.default_position = torch.tensor([robot_offset, 0.0, 0.0])
 robot.default_orientation = torch.tensor([0.0, 0.0, 0.0, 1.0])
 print(robot)
-*_, robot_ik = get_curobo_models(robot, no_gnd=True)
+_, _, robot_ik = get_curobo_models(robot, no_gnd=True)
 curobo_n_dof = len(robot_ik.robot_config.cspace.joint_names)
 ee_n_dof = len(robot.gripper_open_q)
 
+init_states[0]["robots"][robot.name]["dof_pos"]["panda_finger_joint1"] = 0.04
+init_states[0]["robots"][robot.name]["dof_pos"]["panda_finger_joint2"] = 0.04
+
+log.debug(init_states[0:1])
+
 obs, extras = env.reset(states=init_states[0:1])
-
-dummy_action = [
-        {"dof_pos_target": dict(zip(robot.actuators.keys(), [0.0] * len(robot.actuators.keys())))} for _ in range(scenario.num_envs)
-    ]
-for _ in range(120):
-    obs, _, _, _, _ = env.step(dummy_action)
-
 ############ TEMPORARY ############
 # just save second camera viewpoint
 # img2 = obs.cameras["camera0"].rgb
@@ -656,11 +654,37 @@ def find_closest_point_in_pcd(pcd, query_point):
     nearest_point = np.asarray(pcd.points)[idx[0]]
     return nearest_point
 
+def filter_out_robot_from_pcd(pcd: o3d.geometry.PointCloud) -> o3d.geometry.PointCloud:
+    """
+    Filtering out a robot region from pcd.
+    """
+    # Currently this is a hard-coded script, based on initial robot position which is centered at (1.15, 0.0, 1.0) and dimension is (0.3, 0.3, 2.0)
+    # TODO : remove robot using segmentation
+    # ex) https://github.com/NVlabs/curobo/blob/ebb71702f3f70e767f40fd8e050674af0288abe8/examples/robot_image_segmentation_example.py
+    points = np.array(pcd.points)
+    colors = np.array(pcd.colors)
+
+    robot_offset = np.array([1.15, 0.0, 1.0])
+    robot_dimension = np.array([0.3, 0.3, 2.0])  # x, y, z dimensions
+    point_mask = np.logical_or(
+        np.abs(points[:, 0] - robot_offset[0]) > robot_dimension[0] / 2,
+        np.abs(points[:, 1] - robot_offset[1]) > robot_dimension[1] / 2,
+        np.abs(points[:, 2] - robot_offset[2]) > robot_dimension[2] / 2,
+    )
+    points_filtered = points[point_mask]
+    colors_filtered = colors[point_mask]
+    pcd_filtered = o3d.geometry.PointCloud()
+    pcd_filtered.points = o3d.utility.Vector3dVector(points_filtered)
+    pcd_filtered.colors = o3d.utility.Vector3dVector(colors_filtered)
+    return pcd_filtered
+
+
 def move_to_pose(
     obs, obs_saver, robot_ik, robot, scenario, ee_pos_target, ee_quat_target, steps=10, open_gripper=False
 ):
     """Move the robot to the target pose."""
     curr_robot_q = obs.robots[robot.name].joint_pos
+    log.debug(f"Current robot q: {curr_robot_q}")
 
     seed_config = curr_robot_q[:, :curobo_n_dof].unsqueeze(1).tile([1, robot_ik._num_seeds, 1])
 
@@ -668,19 +692,22 @@ def move_to_pose(
 
     q = torch.zeros((scenario.num_envs, robot.num_joints), device="cuda:0")
     ik_succ = result.success.squeeze(1)
+    if not ik_succ:
+        log.debug("Failed to find feasible solution")
+        return obs
+    log.debug(f"{result}")
     q[ik_succ, :curobo_n_dof] = result.solution[ik_succ, 0].clone()
+
+    # open gripper
     q[:, -ee_n_dof:] = 0.04 if open_gripper else 0.0
+
     actions = [
         {"dof_pos_target": dict(zip(robot.actuators.keys(), q[i_env].tolist()))} for i_env in range(scenario.num_envs)
     ]
-    dummy_action = [
-            {"dof_pos_target": dict(zip(robot.actuators.keys(), [0.0] * len(robot.actuators.keys())))} for _ in range(scenario.num_envs)
-    ]
-    # print(actions)
     for i in range(steps):
         obs, reward, success, time_out, extras = env.step(actions)
-        # obs, _, _, _, _ = env.step(dummy_action)
         obs_saver.add(obs)
+        # log.debug(f"Reward {reward}, Success {success}, Timeout {time_out}, Extras {extras}")
     return obs
 
 
@@ -688,18 +715,23 @@ step = 0
 robot_joint_limits = scenario.robots[0].joint_limits
 for step in range(1):
     log.debug(f"Step {step}")
+
+    # dummy for sleep?
     dummy_action = [
             {"dof_pos_target": dict(zip(robot.actuators.keys(), [0.0] * len(robot.actuators.keys())))} for _ in range(scenario.num_envs)
         ]
     for _ in range(120):
         obs, _, _, _, _ = env.step(dummy_action)
     obs_saver.add(obs)
+
     states = env.handler.get_states()
     curr_robot_q = states.robots[robot.name].joint_pos.cuda()
 
-    seed_config = curr_robot_q[:, :curobo_n_dof].unsqueeze(1).tile([1, robot_ik._num_seeds, 1])
-
     pcd, depth, cam_intr_mat, cam_extr_mat = get_point_cloud_from_obs(obs)
+    pcd = filter_out_robot_from_pcd(pcd)
+    *_, robot_ik = get_curobo_models_with_pcd(pcd, robot)
+
+    seed_config = curr_robot_q[:, :curobo_n_dof].unsqueeze(1).tile([1, robot_ik._num_seeds, 1])
 
     # Method 5: Print point cloud statistics
     points_array = np.array(pcd.points)
@@ -790,7 +822,6 @@ for step in range(1):
     )[0]
 
     log.info(f"Qwen2.5-VL output: {output_text}")
-    # point = parse_point(output_text, (img.width, img.height))
     point = extract_points(output_text, img.width, img.height)
     log.info(f"Qwen2.5-VL point: {point}")
 
@@ -905,21 +936,8 @@ for step in range(1):
     ).float()
     rotation = rotation_target @ rotation_transform_for_franka
 
-
-    # rot = torch.tensor([[-1, 0, 0], [0, -1, 0], [0, 0, 1]]).float()
-    # calib_rotation = rotation @ rot
-
     quat = R.from_matrix(rotation).as_quat()
     quat *= np.array([1., -1., -1., 1.])
-
-    # q_90 = R.from_euler('z', 90, degrees=True).as_quat()
-
-    # q = [0, 1, 0, 0]
-    # r = R.from_quat(q)
-    # quat = (r * R.from_quat(quat)).as_quat()
-
-
-    # quat = (R.from_quat([0, 0, 1, 0]) * R.from_quat(quat)).as_quat()
 
     ee_pos_target = torch.zeros((args.num_envs, 3), device="cuda:0")
     ee_quat_target = torch.zeros((args.num_envs, 4), device="cuda:0")
@@ -953,19 +971,16 @@ for step in range(1):
 
     # TODO: set hyperparameter for heuristic grasp posing
     pre_grasp_pos[:, 2] += 0.20
-    # grasp_pos[:, 2] += 0.01
-    # grasp_pos[:, 0] -= 0.01
+    lift_pos[:, 2] += 0.2
+    grasp_pos[:, 2] += 0.1
     log.info(f"gripper_out: {gripper_out}")
     log.info(f"pre_grasp_pos: {pre_grasp_pos}")
     log.info(f"grasp_pos: {grasp_pos}")
-    lift_pos[:, 2] += 0.3
-    grasp_pos[:, 2] += 0.06
 
     # TODO: line 965-971
     obs = move_to_pose(
         obs, obs_saver, robot_ik, robot, scenario, pre_grasp_pos, ee_quat_target, steps=50, open_gripper=True
     )
-    # break
     obs = move_to_pose(
         obs, obs_saver, robot_ik, robot, scenario, grasp_pos, ee_quat_target, steps=50, open_gripper=True
     )
@@ -979,153 +994,3 @@ for step in range(1):
     step += 1
 
 obs_saver.save()
-
-
-# if __name__ == "__main__":
-#     import open3d as o3d
-
-#     cloud = o3d.io.read_point_cloud("third_party/gsnet/assets/test.ply")
-
-#     gsnet = GSNet()
-#     gg = gsnet.inference(np.array(cloud.points))
-#     gsnet.visualize(cloud, gg)
-
-
-# grasp_position = filtered_gg[0].translation
-# grasp_position[2] = -grasp_position[2]
-
-# print(grasp_position, place_position)
-# delta_m = np.array([[0, 0, 1], [0, -1, 0], [1, 0, 0]])
-# # import pdb; pdb.set_trace()
-# rotation_output = filtered_gg[0].rotation_matrix.copy()
-# print(rotation_output)
-# rotation_output[2, :] = -rotation_output[2, :]
-# rotation_output[:, 2] = -rotation_output[:, 2]
-# print(rotation_output)
-
-
-# # grippers = filtered_gg[:1].to_open3d_geometry_list()
-# # cloud = o3d.geometry.PointCloud()
-# # cloud.points = o3d.utility.Vector3dVector(points_envs[0])
-# # o3d.visualization.draw_geometries([cloud, *grippers])
-
-# rotation_output = np.dot(rotation_output, delta_m)
-# print(rotation_output)
-# grasp_quat_R = R.from_matrix(rotation_output).as_quat()
-# print(grasp_quat_R)
-# rotation_input = grasp_quat_R
-# rotation_input = np.array([rotation_input[3],rotation_input[0],rotation_input[1],rotation_input[2]])
-# grasp_pose = np.concatenate([grasp_position, rotation_input])
-
-# place_pose = np.concatenate([place_position, rotation_input])
-
-# # R: xyzw
-# # IsaacGym: xyzw
-
-# # traj = self.plan_to_pose_curobo(torch.tensor(grasp_pose[:3], dtype = torch.float32), torch.tensor(rotation_input, dtype = torch.float32))
-# # self.move_to_traj(traj, close_gripper=False, save_video=save_video, save_root = save_root, start_step = step_num)
-
-# # self.refresh_observation(get_visual_obs=False)
-
-# # R.from_quat(grasp_pose[3:]).as_matrix()
-# # R.from_quat(rotation_input).as_matrix()
-# # R.from_quat(self.hand_rot.cpu().numpy()).as_matrix()
-
-
-# rotation_unit_vect = rotation_output[:,2]
-
-# grasp_pre_grasp = grasp_pose.copy()
-# grasp_pre_grasp[:3] -= rotation_unit_vect*0.2
-
-# grasp_grasp = grasp_pose.copy()
-# grasp_grasp[:3] -= rotation_unit_vect*0.05
-
-# grasp_lift = grasp_pose.copy()
-# grasp_lift[2] += 0.3
-# # grasp_lift[:3] -= rotation_unit_vect*0.2
-
-# place_pose[:3] -= rotation_unit_vect*0.05
-# place_position_lift = place_pose.copy()
-# place_position_lift[2] += 0.3
-# place_position_place = place_pose.copy()
-# place_position_place[2] += 0.05
-# place_position_up = place_pose.copy()
-# place_position_up[2] += 0.3
-
-# finger_front = np.array([0, 0, -1])
-# finger_side = np.array([0, 1, 0])
-# finger_front_norm = finger_front / np.linalg.norm(finger_front)
-# finger_side_norm = finger_side / np.linalg.norm(finger_side)
-# finger_face_norm = np.cross(finger_side_norm, finger_front_norm)
-
-# quaternion = R.from_matrix(np.concatenate([finger_face_norm.reshape(-1,1), finger_side_norm.reshape(-1,1), finger_front_norm.reshape(-1,1)], axis = 1)).as_quat()
-
-# # points_envs, colors_envs, rgb_envs, depth_envs ,seg_envs, ori_points_envs, ori_colors_envs, pixel2pointid, pointid2pixel = self.refresh_observation(get_visual_obs=True)
-# # prompt = grasp_obj_name
-# # masks, bbox_axis_aligned_envs, grasp_envs = self.inference_gsam(rgb_envs[0][0], ori_points_envs[0][0], ori_colors_envs[0][0], text_prompt=prompt, save_dir=self.cfgs["SAVE_ROOT"])
-
-# # grasp_envs[0] += 0.00
-
-# step_num = 0
-# #import pdb; pdb.set_trace()
-# # move to pre-grasp
-# print("grasp_pre_grasp: ", grasp_pre_grasp)
-
-
-# self.prepare_curobo(use_mesh=self.cfgs["USE_MESH_COLLISION"])
-# step_num, traj = self.control_to_pose(grasp_pre_grasp, close_gripper = False, save_video = save_video, save_root = save_root, step_num = step_num)
-# import pdb; pdb.set_trace()
-# points_envs, colors_envs, rgb_envs, depth_envs ,seg_envs, ori_points_envs, ori_colors_envs, pixel2pointid, pointid2pixel = self.refresh_observation(get_visual_obs=True)
-
-# trajs = []
-# fig_data = []
-# for _ in range(5):
-#     # add noise
-#     _=0
-#     target = filtered_gg[_].translation
-#     target[2] = -target[2]
-#     grasp_grasp[:3] = target
-#     step_num, traj = self.control_to_pose(grasp_grasp, close_gripper = False, save_video = save_video, save_root = save_root, step_num = step_num)
-#     trajs.append(traj)
-#     config_file = load_yaml(join_path(get_robot_path(), "franka.yml"))
-#     urdf_file = config_file["robot_cfg"]["kinematics"]["urdf_path"]  # Send global path starting with "/"
-#     base_link = config_file["robot_cfg"]["kinematics"]["base_link"]
-#     ee_link = config_file["robot_cfg"]["kinematics"]["ee_link"]
-#     tensor_args = TensorDeviceType()
-#     robot_cfg = RobotConfig.from_basic(urdf_file, base_link, ee_link, tensor_args)
-#     kin_model = CudaRobotModel(robot_cfg.kinematics)
-#     qpos = torch.tensor(traj.position, **vars(tensor_args))
-#     out = kin_model.get_state(qpos)
-#     traj_p = out.ee_position.cpu().numpy()
-#     fig_data.append(go.Scatter3d(x=traj_p[:,0], y=traj_p[:,1], z=traj_p[:,2], mode='markers', name='waypoints', marker=dict(size=10, color='red')))
-#     for i in range(0, traj_p[:,0].shape[0] - 1): fig_data.append(go.Scatter3d(x=traj_p[:,0][i:i+2], y=traj_p[:,1][i:i+2], z=traj_p[:,2][i:i+2], mode='lines', name='path', line=dict(width=10, color='yellow')))
-
-# fig_data.append(go.Scatter3d(x=points_envs[0][:,0], y=points_envs[0][:,1], z=points_envs[0][:,2], mode='markers', name='waypoints', marker=dict(size=4, color=colors_envs[0])))
-# # add lines between waypoints
-# fig = go.Figure(data = fig_data)
-# fig.show()
-# fig.write_html("test.html")
-
-
-# # move to grasp
-# print("grasp_grasp: ", grasp_grasp)
-# step_num, traj = self.control_to_pose(grasp_grasp, close_gripper = False, save_video = save_video, save_root = save_root, step_num = step_num)
-# step_num = self.move_gripper(close_gripper = True, save_video=save_video, save_root = save_root, start_step = step_num)
-
-# # move to lift
-# print("grasp_lift: ", grasp_lift)
-# step_num, traj = self.control_to_pose(grasp_lift, close_gripper = True, save_video = save_video, save_root = save_root, step_num = step_num)
-
-# # move to pre-place
-# print("place_position_lift: ", place_position_lift)
-# step_num, traj = self.control_to_pose(place_position_lift, close_gripper = True, save_video = save_video, save_root = save_root, step_num = step_num)
-
-# # move to place
-# print("place_position_place: ", place_position_place)
-# step_num, traj = self.control_to_pose(place_position_place, close_gripper = True, save_video = save_video, save_root = save_root, step_num = step_num)
-# step_num = self.move_gripper(close_gripper = False, save_video=save_video, save_root = save_root, start_step = step_num)
-
-# # move to pre-place
-
-# print("place_position_up: ", place_position_up)
-# step_num, traj = self.control_to_pose(place_position_up, close_gripper = False, save_video = save_video, save_root = save_root, step_num = step_num)
