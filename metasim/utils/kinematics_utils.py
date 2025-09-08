@@ -11,6 +11,7 @@ from curobo.types.robot import RobotConfig
 from curobo.util_file import get_robot_path, join_path, load_yaml
 from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
 from curobo.wrap.reacher.trajopt import TrajOptSolver, TrajOptSolverConfig
+from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig
 
 
 from metasim.cfg.robots.base_robot_cfg import BaseRobotCfg

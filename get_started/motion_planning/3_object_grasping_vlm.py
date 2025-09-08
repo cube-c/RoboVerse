@@ -239,64 +239,12 @@ scenario2 = ScenarioCfg(
     num_envs=args.num_envs,
 )
 
-# add cameras
-# scenario.cameras = [
-#     # PinholeCameraCfg(width=1024, height=1024, pos=(0.0, 0.0, 1.5), look_at=(1.0, 0.0, 0.0)),
-#     # PinholeCameraCfg(width=1024, height=1024, pos=(-0.6106, 0.0051, 1.5), look_at=(0.6106, 0.0051, 0.0)),
-#     # PinholeCameraCfg(width=1024, height=1024, pos=(1.5, 0.0, 1.5), look_at=(0.0, 0.0, 0.0)),
-
-# ]
-
-# add objects
-# scenario.objects = [
-#     RigidObjCfg(
-#         name="bbq_sauce",
-#         scale=(1.5, 1.5, 1.5),
-#         physics=PhysicStateType.RIGIDBODY,
-#         usd_path="get_started/example_assets/bbq_sauce/usd/bbq_sauce.usd",
-#         urdf_path="get_started/example_assets/bbq_sauce/urdf/bbq_sauce.urdf",
-#         mjcf_path="get_started/example_assets/bbq_sauce/mjcf/bbq_sauce.xml",
-#     ),
-# ]
-
-
 log.info(f"Using simulator: {args.sim}")
 env_class = get_sim_env_class(SimType(args.sim))
 env = env_class(scenario)
 
-# init_states = [
-#     {
-#         "objects": {
-#             "bbq_sauce": {
-#                 "pos": torch.tensor([0.7, -0.2, 0.07]),
-#                 "rot": torch.tensor([1.0, 0.0, 0.0, 0.0]),
-#             },
-#         },
-#         "robots": {
-#             "franka": {
-#                 "pos": torch.tensor([0.0, 0.0, 0.0]),
-#                 "rot": torch.tensor([1.0, 0.0, 0.0, 0.0]),
-#                 "dof_pos": {
-#                     "panda_joint1": 0.0,
-#                     "panda_joint2": -0.785398,
-#                     "panda_joint3": 0.0,
-#                     "panda_joint4": -2.356194,
-#                     "panda_joint5": 0.0,
-#                     "panda_joint6": 1.570796,
-#                     "panda_joint7": 0.785398,
-#                     "panda_finger_joint1": 0.04,
-#                     "panda_finger_joint2": 0.04,
-#                 },
-#             },
-#         },
-#     }
-#     for _ in range(args.num_envs)
-# ]
+init_states, _, _ = get_traj(task, robot, env.handler)
 
-init_states, all_actions, all_states = get_traj(task, robot, env.handler)
-num_demos = len(init_states)
-
-log.info(f"Number of demos: {num_demos}")
 log.info(f"robot position: {init_states[0]['robots'][robot.name]['pos']} | rotation: {init_states[0]['robots'][robot.name]['rot']}")
 # log all objects position
 for obj_name, obj_pos in init_states[0]['objects'].items():
@@ -335,7 +283,7 @@ for obj_name, obj_pos in init_states[0]['objects'].items():
 robot = scenario.robots[0]
 robot.default_position = torch.tensor([robot_offset, 0.0, 0.0])
 robot.default_orientation = torch.tensor([0.0, 0.0, 0.0, 1.0])
-print(robot)
+
 _, _, robot_ik = get_curobo_models(robot, no_gnd=True)
 curobo_n_dof = len(robot_ik.robot_config.cspace.joint_names)
 ee_n_dof = len(robot.gripper_open_q)
@@ -688,14 +636,17 @@ def move_to_pose(
 
     seed_config = curr_robot_q[:, :curobo_n_dof].unsqueeze(1).tile([1, robot_ik._num_seeds, 1])
 
-    result = robot_ik.solve_batch(Pose(ee_pos_target, ee_quat_target), seed_config=seed_config)
+    result = robot_ik.solve_batch(
+        Pose(ee_pos_target, ee_quat_target),
+        seed_config=seed_config,
+    )
 
     q = torch.zeros((scenario.num_envs, robot.num_joints), device="cuda:0")
     ik_succ = result.success.squeeze(1)
-    if not ik_succ:
+    if not ik_succ.any():
         log.debug("Failed to find feasible solution")
         return obs
-    log.debug(f"{result}")
+    log.debug(f"Result robot q: {result.solution[ik_succ, 0]}")
     q[ik_succ, :curobo_n_dof] = result.solution[ik_succ, 0].clone()
 
     # open gripper
