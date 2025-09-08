@@ -190,27 +190,10 @@ object_name = args.object_name
 
 task = get_task(task_name)
 robot = get_robot(args.robot)
-
-# actual default
-# camera = PinholeCameraCfg(width=1024, height=1024, pos=(0.9, -0.3, 0.9), look_at=(0.0, 0.0, 0.0))
-
-
-
 robot_offset = 1.15
 
 # default
-camera = PinholeCameraCfg(width=1024, height=1024, pos=(0.5, -0.5, 0.5), look_at=(0.0, 0.0, 0.0))
-
-# robot is at bottom
-# camera = PinholeCameraCfg(width=1024, height=1024, pos=(-0.8, 0.0, 0.8), look_at=(0.4, 0.0, 0.0))
-
-# robot is at upper center
-# camera = PinholeCameraCfg(width=1024, height=1024, pos=(1.5, 0.0, 1.5), look_at=(0.0, 0.0, 0.0))
-
-# this code -- default
-# camera = PinholeCameraCfg(width=1024, height=1024, pos=(0.0, 0.0, 1.0), look_at=(1.0, 0.0, 0.0))
 camera = PinholeCameraCfg(width=1024, height=1024, pos=(0.0, 0.0, 0.8), look_at=(0.9, 0.0, 0.0))
-
 camera2 = PinholeCameraCfg(width=1024, height=1024, pos=(0.9, 1.0, 0.6), look_at=(0.9, 0.0, 0.0))
 log.info(f"Camera position: {camera.pos}")
 log.info(f"Camera look_at: {camera.look_at}")
@@ -293,35 +276,6 @@ init_states[0]["robots"][robot.name]["dof_pos"]["panda_finger_joint2"] = 0.04
 log.debug(init_states[0:1])
 
 obs, extras = env.reset(states=init_states[0:1])
-############ TEMPORARY ############
-# just save second camera viewpoint
-# img2 = obs.cameras["camera0"].rgb
-# depth2 = obs.cameras["camera0"].depth
-# img2_path = "get_started/output/motion_planning/3_object_grasping_vlm/img2.png"
-# depth2_path = "get_started/output/motion_planning/3_object_grasping_vlm/depth2.png"
-# # save depth2 array as npy
-# np.save("get_started/output/motion_planning/3_object_grasping_vlm/depth2.npy", depth2[0].cpu().numpy())
-# # save img2 array as npy
-# np.save("get_started/output/motion_planning/3_object_grasping_vlm/img2.npy", img2[0].cpu().numpy())
-
-# max_depth2 = np.max(depth2[0].cpu().numpy())
-# scene_depth2 = depth2 / max_depth2 * 255.0 # normalize depth to [0, 1]
-# scene_img2 = Image.fromarray(img2[0].cpu().numpy())
-# scene_depth2 = Image.fromarray((scene_depth2[0].squeeze(-1).cpu().numpy() / max_depth2 * 255.0).astype('uint8'))
-# scene_img2.save(img2_path)
-# scene_depth2.save(depth2_path)
-# exit()
-####################################
-
-# sim_steps = int(2.0 / env.sim_dt)  # env.sim_dt is the simulation time step
-# dummy_action = [
-#         {"dof_pos_target": dict(zip(robot.actuators.keys(), [0.0] * len(robot.actuators.keys())))} for _ in range(scenario.num_envs)
-#     ]
-# for _ in range(120):
-#     obs, _, _, _, _ = env.step(dummy_action)
-# no_robot_init_states = copy.deepcopy(init_states[0])
-# no_robot_init_states["robots"][robot.name]["pos"][0] = 1e5
-# no_robot_obs, _ = env.reset(states=[no_robot_init_states])
 os.makedirs("get_started/output", exist_ok=True)
 
 
@@ -503,25 +457,6 @@ def get_3d_point_from_pixel(pixel_point, depth, cam_intr_mat, cam_extr_mat):
     xyz = point_world[:3]
     log.info(f"xyz: {xyz}")
     return xyz
-
-def quat_inverse(q):
-    return torch.cat([-q[:, :3], q[:, 3:]], dim=-1)
-
-def quat_rotate(q, v):
-    """Rotate vector v by quaternion q"""
-    qvec = q[:, :3]
-    uv = torch.cross(qvec, v, dim=-1)
-    uuv = torch.cross(qvec, uv, dim=-1)
-    return v + 2 * (q[:, 3:]*uv + uuv)
-
-def quat_mul(q1, q2):
-    x1, y1, z1, w1 = q1.unbind(-1)
-    x2, y2, z2, w2 = q2.unbind(-1)
-    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
-    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
-    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
-    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
-    return torch.stack([x, y, z, w], dim=-1)
 
 def find_closest_point_in_pcd(pcd, query_point):
     """
