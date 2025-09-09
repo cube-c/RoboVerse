@@ -152,6 +152,51 @@ class VLMPointExtractor:
         return all_points
 
 
+class GraspPoseFinder:
+    def __init__(self):
+        self.gsnet = GSNet()
+
+    def find(self, pcd: o3d.geometry.PointCloud):
+        points = np.array(pcd.points)
+        log.info(f"Point cloud shape: {points.shape}")
+        log.info(
+            f"Point cloud bounds: X[{points[:, 0].min():.3f}, {points[:, 0].max():.3f}], "
+            f"Y[{points[:, 1].min():.3f}, {points[:, 1].max():.3f}], "
+            f"Z[{points[:, 2].min():.3f}, {points[:, 2].max():.3f}]"
+        )
+
+        # do not consider the arm points
+        # point_mask = points[:,2] <= 0.1
+        point_mask = np.ones(points.shape[0], dtype=bool)
+        point_mask = np.logical_and(
+            points[:, 2] <= 0.2,
+            np.logical_and(points[:, 0] <= 1.0, np.logical_and(points[:, 1] >= -1.0, points[:, 1] <= 1.0)),
+        )
+
+        # point_mask = np.logical_and(points[:,2] <= 0.1 , points[:,0] >= 0.1)
+        points_masked = points[point_mask]
+        points_masked[:, 2] = -points_masked[:, 2]
+        points_masked[:, 1] = -points_masked[:, 1]
+        log.info(
+            f"New Point cloud bounds: X[{points_masked[:, 0].min():.3f}, {points_masked[:, 0].max():.3f}], "
+            f"Y[{points_masked[:, 1].min():.3f}, {points_masked[:, 1].max():.3f}], "
+            f"Z[{points_masked[:, 2].min():.3f}, {points_masked[:, 2].max():.3f}]"
+        )
+        points_masked = o3d.utility.Vector3dVector(points_masked)
+        grasps = self.gsnet.inference(np.array(points_masked))
+
+        # log best grasp candidate
+        log.info(f"Total grasp candidates: {len(grasps)}")
+        log.info(f"Best grasp candidate: {grasps[0].translation}")
+        log.info(f"Best grasp candidate rotation: {grasps[0].rotation_matrix}")
+
+        return grasps
+
+    def visualize(self, pcd: o3d.geometry.PointCloud, grasps, image_only=False, save_dir="", filename=""):
+        pcd_clone = copy.deepcopy(pcd)
+        self.gsnet.visualize(pcd_clone, grasps, image_only=image_only, save_dir=save_dir, filename=filename)
+
+
 def get_environment(scenario, sim="isaaclab", robot_offset=1.15):
     """Initialize the simulation environment."""
     log.info(f"Using simulator: {sim}")
@@ -421,9 +466,8 @@ def move_to_pose(
         {"dof_pos_target": dict(zip(robot.actuators.keys(), q[i_env].tolist()))} for i_env in range(scenario.num_envs)
     ]
     for i in range(steps):
-        obs, reward, success, time_out, extras = env.step(actions)
+        obs, _, _, _, _ = env.step(actions)
         obs_saver.add(obs)
-        # log.debug(f"Reward {reward}, Success {success}, Timeout {time_out}, Extras {extras}")
     return obs
 
 
@@ -481,13 +525,14 @@ obs_saver = ObsSaver(
 )
 obs_saver.add(obs)
 
+grasp_finder = GraspPoseFinder()
 
 step = 0
 robot_joint_limits = scenario.robots[0].joint_limits
 for step in range(1):
     log.debug(f"Step {step}")
 
-    # dummy for sleep?
+    # Warm up the environment by taking some dummy actions
     dummy_action = [
         {"dof_pos_target": dict(zip(robot.actuators.keys(), [0.0] * len(robot.actuators.keys())))}
         for _ in range(scenario.num_envs)
@@ -496,62 +541,19 @@ for step in range(1):
         obs, _, _, _, _ = env.step(dummy_action)
     obs_saver.add(obs)
 
-    states = env.handler.get_states()
-    curr_robot_q = states.robots[robot.name].joint_pos.cuda()
-
+    # Get point cloud from observation
     pcd, depth, cam_intr_mat, cam_extr_mat = get_point_cloud_from_obs(obs)
     pcd = filter_out_robot_from_pcd(pcd)
     *_, robot_ik = get_curobo_models_with_pcd(pcd, robot)
 
-    # Method 5: Print point cloud statistics
-    points_array = np.array(pcd.points)
-    colors_array = np.array(pcd.colors) if pcd.has_colors() else None
-    log.info(f"Point cloud shape: {points_array.shape}")
-    log.info(
-        f"Point cloud bounds: X[{points_array[:, 0].min():.3f}, {points_array[:, 0].max():.3f}], "
-        f"Y[{points_array[:, 1].min():.3f}, {points_array[:, 1].max():.3f}], "
-        f"Z[{points_array[:, 2].min():.3f}, {points_array[:, 2].max():.3f}]"
-    )
-
-    points = np.array(pcd.points)
-    # print("points shape:", points.shape)
-    colors = np.array(pcd.colors)
-    # do not consider the arm points
-    # point_mask= points[:,2] <= 0.1
-    point_mask = np.ones(points.shape[0], dtype=bool)
-    point_mask = np.logical_and(
-        points[:, 2] <= 0.2,
-        np.logical_and(points[:, 0] <= 1.0, np.logical_and(points[:, 1] >= -1.0, points[:, 1] <= 1.0)),
-    )
-    # point_mask = np.logical_and(points[:,2] <= 0.1 , points[:,0] >= 0.1)
-    points_masked = points[point_mask]
-    colors_masked = colors[point_mask]
-    points_masked[:, 2] = -points_masked[:, 2]
-    points_masked[:, 1] = -points_masked[:, 1]
-    pcd.points = o3d.utility.Vector3dVector(points_masked)
-    pcd.colors = o3d.utility.Vector3dVector(colors_masked)
-    log.info(
-        f"New Point cloud bounds: X[{points_masked[:, 0].min():.3f}, {points_masked[:, 0].max():.3f}], "
-        f"Y[{points_masked[:, 1].min():.3f}, {points_masked[:, 1].max():.3f}], "
-        f"Z[{points_masked[:, 2].min():.3f}, {points_masked[:, 2].max():.3f}]"
-    )
-    gsnet = GSNet()
-    gg = gsnet.inference(np.array(pcd.points))
-    log.info(f"Total grasp candidates: {len(gg)}")
-    # log best grasp candidate
-    log.info(f"Best grasp candidate: {gg[0].translation}")
-    log.info(f"Best grasp candidate rotation: {gg[0].rotation_matrix}")
-    # gsnet.visualize(pcd, gg)
-
     # remove file: /home/lukesong_google_com/RoboVerse/get_started/output/motion_planning/3_object_grasping_vlm/gsnet_visualization.png
-    if os.path.exists("get_started/output/motion_planning/3_object_grasping_vlm/gsnet_visualization_new.png"):
-        os.remove("get_started/output/motion_planning/3_object_grasping_vlm/gsnet_visualization_new.png")
+    # if os.path.exists("get_started/output/motion_planning/3_object_grasping_vlm/gsnet_visualization_new.png"):
+    #   os.remove("get_started/output/motion_planning/3_object_grasping_vlm/gsnet_visualization_new.png")
+    gg = grasp_finder.find(pcd)
 
-    pcd_clone1 = copy.deepcopy(pcd)
-    gsnet.visualize(pcd_clone1, gg, image_only=True, save_dir="3_object_grasping_vlm", filename=f"{task_name}")
-    pcd_clone2 = copy.deepcopy(pcd)
-    gsnet.visualize(
-        pcd_clone2, gg[:1], image_only=True, save_dir="3_object_grasping_vlm", filename=f"gsnet_top_one_{task_name}"
+    grasp_finder.visualize(pcd, gg, image_only=True, save_dir="3_object_grasping_vlm", filename=f"{task_name}")
+    grasp_finder.visualize(
+        pcd, gg[:1], image_only=True, save_dir="3_object_grasping_vlm", filename=f"gsnet_top_one_{task_name}"
     )
 
     # # Qwen2.5-VL
@@ -603,9 +605,8 @@ for step in range(1):
     if len(point_3d) > 0 and closest_grasp is not None:
         selected_gg = gg[closest_grasp]
         log.info(f"Selected grasp based on VLM detection: grasp #{closest_grasp}")
-        pcd_clone3 = copy.deepcopy(pcd)
-        gsnet.visualize(
-            pcd_clone3,
+        grasp_finder.visualize(
+            pcd,
             gg[closest_grasp : closest_grasp + 1],
             image_only=True,
             save_dir="3_object_grasping_vlm",
