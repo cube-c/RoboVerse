@@ -152,62 +152,60 @@ class VLMPointExtractor:
         return all_points
 
 
-def get_environment(scenario, robot, sim="isaaclab", robot_offset=1.15):
+def get_environment(scenario, sim="isaaclab", robot_offset=1.15):
     """Initialize the simulation environment."""
     log.info(f"Using simulator: {sim}")
     env_class = get_sim_env_class(SimType(sim))
     env = env_class(scenario)
 
+    robot = scenario.robots[0]
     init_states, _, _ = get_traj(task, robot, env.handler)
+    init_state = init_states[0]
 
-    log.info(
-        f"robot position: {init_states[0]['robots'][robot.name]['pos']} | rotation: {init_states[0]['robots'][robot.name]['rot']}"
-    )
+    init_robot = init_state["robots"][robot.name]
+    init_objects = init_state["objects"]
+
+    log.info(f"robot position: {init_robot['pos']} | rotation: {init_robot['rot']}")
     # log all objects position
-    for obj_name, obj_pos in init_states[0]["objects"].items():
+    for obj_name, obj_pos in init_objects.items():
         log.info(f"object {obj_name} position: {obj_pos['pos']} | rotation: {obj_pos['rot']}")
 
     # translate robot and all objects to make robot at the origin
-    robot_pos = init_states[0]["robots"][robot.name]["pos"]
-    for obj_name, obj_pos in init_states[0]["objects"].items():
-        init_states[0]["objects"][obj_name]["pos"] -= robot_pos
-    init_states[0]["robots"][robot.name]["pos"] = torch.tensor([0.0, 0.0, 0.0])
+    for obj_name, obj_pos in init_objects.items():
+        init_objects[obj_name]["pos"] -= init_robot["pos"]
 
-    # translate robot to (3.0, 0.0, 0.0) and rotate 180 degrees around z axis
-    init_states[0]["robots"][robot.name]["pos"] = torch.tensor([robot_offset, 0.0, 0.0])
-    init_states[0]["robots"][robot.name]["rot"] = torch.tensor([0.0, 0.0, 0.0, 1.0])
+    # translate robot to (robot_offset, 0.0, 0.0) and rotate 180 degrees around z axis
+    init_robot["pos"] = torch.tensor([robot_offset, 0.0, 0.0])
+    init_robot["rot"] = torch.tensor([0.0, 0.0, 0.0, 1.0])
     # translate/rotate all objects relative to robot
     q_z_180 = torch.tensor([0.0, 1.0, 0.0, 0.0])
     q_x_180 = torch.tensor([1.0, 0.0, 0.0, 0.0])
 
-    for obj_name, obj_pos in init_states[0]["objects"].items():
-        init_states[0]["objects"][obj_name]["pos"][0] = (
-            robot_offset - init_states[0]["objects"][obj_name]["pos"][0] + 0.05
-        )
-        init_states[0]["objects"][obj_name]["pos"][1] = -init_states[0]["objects"][obj_name]["pos"][1]
+    for obj_name, obj_pos in init_objects.items():
+        init_objects[obj_name]["pos"][0] = robot_offset - init_objects[obj_name]["pos"][0] + 0.05
+        init_objects[obj_name]["pos"][1] = -init_objects[obj_name]["pos"][1]
         if obj_name == "ketchup" or obj_name == "salad_dressing":
-            init_states[0]["objects"][obj_name]["rot"] = torch.tensor(
-                (R.from_quat(q_z_180) * R.from_quat(init_states[0]["objects"][obj_name]["rot"])).as_quat()
+            init_objects[obj_name]["rot"] = torch.tensor(
+                (R.from_quat(q_z_180) * R.from_quat(init_objects[obj_name]["rot"])).as_quat()
             )
         if obj_name == "bbq_sauce":
-            init_states[0]["objects"][obj_name]["rot"] = torch.tensor(
-                (R.from_quat(q_x_180) * R.from_quat(init_states[0]["objects"][obj_name]["rot"])).as_quat()
+            init_objects[obj_name]["rot"] = torch.tensor(
+                (R.from_quat(q_x_180) * R.from_quat(init_objects[obj_name]["rot"])).as_quat()
             )
 
     log.info(
-        f"[After translation] robot position: {init_states[0]['robots'][robot.name]['pos']} | rotation: {init_states[0]['robots'][robot.name]['rot']}"
+        f"[After translation] robot position: {init_state['robots'][robot.name]['pos']} | rotation: {init_state['robots'][robot.name]['rot']}"
     )
-    for obj_name, obj_pos in init_states[0]["objects"].items():
+    for obj_name, obj_pos in init_objects.items():
         log.info(f"[After translation] object {obj_name} position: {obj_pos['pos']} | rotation: {obj_pos['rot']}")
 
-    robot = scenario.robots[0]
     robot.default_position = torch.tensor([robot_offset, 0.0, 0.0])
     robot.default_orientation = torch.tensor([0.0, 0.0, 0.0, 1.0])
 
-    init_states[0]["robots"][robot.name]["dof_pos"]["panda_finger_joint1"] = 0.04
-    init_states[0]["robots"][robot.name]["dof_pos"]["panda_finger_joint2"] = 0.04
+    init_robot["dof_pos"]["panda_finger_joint1"] = 0.04
+    init_robot["dof_pos"]["panda_finger_joint2"] = 0.04
 
-    obs, _ = env.reset(states=init_states[0:1])
+    obs, _ = env.reset(states=[init_state])
     return obs, env
 
 
@@ -457,8 +455,6 @@ task_name = args.task_name
 object_name = args.object_name
 
 task = get_task(task_name)
-robot = get_robot(args.robot)
-robot_offset = 1.15
 
 # default
 scenario = ScenarioCfg(
@@ -473,8 +469,10 @@ scenario = ScenarioCfg(
     headless=args.headless,
     num_envs=args.num_envs,
 )
+robot = scenario.robots[0]
+robot_offset = 1.15
 
-obs, env = get_environment(scenario, robot, sim=args.sim)
+obs, env = get_environment(scenario, sim=args.sim)
 
 ## Main loop
 os.makedirs("get_started/output", exist_ok=True)
