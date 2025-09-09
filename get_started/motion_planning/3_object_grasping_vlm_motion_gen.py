@@ -12,14 +12,13 @@ try:
 except ImportError:
     pass
 
-import os
 import copy
-# import getpass
+import os
 
+# import getpass
 # user = getpass.getuser()  # Safe way to get current username
 # os.environ["XDG_RUNTIME_DIR"] = f"/tmp/{user}-runtime"
 # os.makedirs(os.environ["XDG_RUNTIME_DIR"], exist_ok=True)
-
 import numpy as np
 import rootutils
 import torch
@@ -32,40 +31,37 @@ log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 
 import open3d as o3d
 import rootutils
-from curobo.types.math import Pose
 from loguru import logger as log
 from rich.logging import RichHandler
 
-from get_started.utils import convert_to_ply
+from curobo.types.math import Pose
 
 rootutils.setup_root(__file__, pythonpath=True)
 log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
+import re
+
+from PIL import Image, ImageDraw
 from scipy.spatial.transform import Rotation as R
+from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
 from get_started.motion_planning.util_gsnet import GSNet
 from get_started.utils import ObsSaver, get_pcd_from_rgbd
-from metasim.cfg.objects import RigidObjCfg
 from metasim.cfg.scenario import ScenarioCfg
 from metasim.cfg.sensors import PinholeCameraCfg
-from metasim.constants import PhysicStateType, SimType
+from metasim.constants import SimType
 from metasim.utils import configclass
 from metasim.utils.camera_util import get_cam_params
-from metasim.utils.kinematics_utils import get_curobo_models, get_curobo_models_with_pcd
-from metasim.utils.setup_util import get_sim_env_class, get_robot, get_task
-
 from metasim.utils.demo_util import get_traj
-
-from PIL import Image, ImageDraw
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoModelForCausalLM, AutoProcessor, GenerationConfig
-from typing import Optional
-import re
-from xml.etree import ElementTree
+from metasim.utils.kinematics_utils import get_curobo_models, get_curobo_models_with_pcd
+from metasim.utils.setup_util import get_robot, get_sim_env_class, get_task
 
 
 class VLMPointExtractor:
     def __init__(self, ckpt_path="Qwen/Qwen2.5-VL-7B-Instruct"):
         self.ckpt_path = ckpt_path
-        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(ckpt_path, torch_dtype="auto", device_map="auto")
+        self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            ckpt_path, torch_dtype="auto", device_map="auto"
+        )
         self.processor = AutoProcessor.from_pretrained(ckpt_path)
 
     def extract_points(self, img, object_name):
@@ -78,12 +74,10 @@ class VLMPointExtractor:
                     {"type": "image", "image": img},
                     {"type": "text", "text": prompt},
                 ],
-            }
+            },
         ]
 
-        text = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = self.processor(
             text=text,
             images=img,
@@ -91,14 +85,12 @@ class VLMPointExtractor:
         )
         inputs = inputs.to(self.model.device)
         generated_ids = self.model.generate(**inputs, max_new_tokens=256)
-        generated_ids_trimmed = [
-            out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-        ]
+        generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
         output_text = self.processor.batch_decode(
             generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )[0]
 
-        #log.info(f"Qwen2.5-VL output: {output_text}")
+        # log.info(f"Qwen2.5-VL output: {output_text}")
         point = self._extract_points_from_text(output_text, img.width, img.height)
         log.info(f"Qwen2.5-VL point: {point}")
         return point
@@ -145,7 +137,7 @@ class VLMPointExtractor:
                 # point /= 100.0
                 # point = point * np.array([image_w, image_h])
                 all_points.append(point)
-        for match in re.finditer(r'(?:\d+|p)\s*=\s*([0-9]{3})\s*,\s*([0-9]{3})', text):
+        for match in re.finditer(r"(?:\d+|p)\s*=\s*([0-9]{3})\s*,\s*([0-9]{3})", text):
             try:
                 point = [int(match.group(i)) / 10.0 for i in range(1, 3)]
             except ValueError:
@@ -159,6 +151,7 @@ class VLMPointExtractor:
                 point = point * np.array([image_w, image_h])
                 all_points.append(point)
         return all_points
+
 
 @configclass
 class Args:
@@ -174,7 +167,6 @@ class Args:
     headless: bool = False
     task_name: str = "LiberoPickChocolatePudding"
     object_name: str = "BBQ sauce"
-
 
     def __post_init__(self):
         """Post-initialization configuration."""
@@ -227,38 +219,46 @@ env = env_class(scenario)
 
 init_states, _, _ = get_traj(task, robot, env.handler)
 
-log.info(f"robot position: {init_states[0]['robots'][robot.name]['pos']} | rotation: {init_states[0]['robots'][robot.name]['rot']}")
+log.info(
+    f"robot position: {init_states[0]['robots'][robot.name]['pos']} | rotation: {init_states[0]['robots'][robot.name]['rot']}"
+)
 # log all objects position
-for obj_name, obj_pos in init_states[0]['objects'].items():
+for obj_name, obj_pos in init_states[0]["objects"].items():
     log.info(f"object {obj_name} position: {obj_pos['pos']} | rotation: {obj_pos['rot']}")
 # log.info(f"")
 
 # translate robot and all objects to make robot at the origin
-robot_pos = init_states[0]['robots'][robot.name]['pos']
-for obj_name, obj_pos in init_states[0]['objects'].items():
-    init_states[0]['objects'][obj_name]['pos'] -= robot_pos
-init_states[0]['robots'][robot.name]['pos'] = torch.tensor([0.0, 0.0, 0.0])
+robot_pos = init_states[0]["robots"][robot.name]["pos"]
+for obj_name, obj_pos in init_states[0]["objects"].items():
+    init_states[0]["objects"][obj_name]["pos"] -= robot_pos
+init_states[0]["robots"][robot.name]["pos"] = torch.tensor([0.0, 0.0, 0.0])
 
 # translate robot to (3.0, 0.0, 0.0) and rotate 180 degrees around z axis
-init_states[0]['robots'][robot.name]['pos'] = torch.tensor([robot_offset, 0.0, 0.0])
-init_states[0]['robots'][robot.name]['rot'] = torch.tensor([0.0, 0.0, 0.0, 1.0])
+init_states[0]["robots"][robot.name]["pos"] = torch.tensor([robot_offset, 0.0, 0.0])
+init_states[0]["robots"][robot.name]["rot"] = torch.tensor([0.0, 0.0, 0.0, 1.0])
 # translate/rotate all objects relative to robot
 q_z_180 = torch.tensor([0.0, 1.0, 0.0, 0.0])
 q_x_180 = torch.tensor([1.0, 0.0, 0.0, 0.0])
 # Convert existing quaternion to scipy Rotation
 # r_existing = R.from_quat(q_existing)
-for obj_name, obj_pos in init_states[0]['objects'].items():
-    init_states[0]['objects'][obj_name]['pos'][0] = robot_offset - init_states[0]['objects'][obj_name]['pos'][0] + 0.05
-    init_states[0]['objects'][obj_name]['pos'][1] = -init_states[0]['objects'][obj_name]['pos'][1]
+for obj_name, obj_pos in init_states[0]["objects"].items():
+    init_states[0]["objects"][obj_name]["pos"][0] = robot_offset - init_states[0]["objects"][obj_name]["pos"][0] + 0.05
+    init_states[0]["objects"][obj_name]["pos"][1] = -init_states[0]["objects"][obj_name]["pos"][1]
     # print((R.from_quat(q_z_180) * R.from_quat(init_states[0]['objects'][obj_name]['rot'])).as_quat())
     if obj_name == "ketchup" or obj_name == "salad_dressing":
-        init_states[0]['objects'][obj_name]['rot'] = torch.tensor((R.from_quat(q_z_180) * R.from_quat(init_states[0]['objects'][obj_name]['rot'])).as_quat())
+        init_states[0]["objects"][obj_name]["rot"] = torch.tensor(
+            (R.from_quat(q_z_180) * R.from_quat(init_states[0]["objects"][obj_name]["rot"])).as_quat()
+        )
     if obj_name == "bbq_sauce":
-        init_states[0]['objects'][obj_name]['rot'] = torch.tensor((R.from_quat(q_x_180) * R.from_quat(init_states[0]['objects'][obj_name]['rot'])).as_quat())
+        init_states[0]["objects"][obj_name]["rot"] = torch.tensor(
+            (R.from_quat(q_x_180) * R.from_quat(init_states[0]["objects"][obj_name]["rot"])).as_quat()
+        )
     # init_states[0]['objects'][obj_name]['rot'][-1] = -init_states[0]['objects'][obj_name]['rot'][-1]
 
-log.info(f"[After translation] robot position: {init_states[0]['robots'][robot.name]['pos']} | rotation: {init_states[0]['robots'][robot.name]['rot']}")
-for obj_name, obj_pos in init_states[0]['objects'].items():
+log.info(
+    f"[After translation] robot position: {init_states[0]['robots'][robot.name]['pos']} | rotation: {init_states[0]['robots'][robot.name]['rot']}"
+)
+for obj_name, obj_pos in init_states[0]["objects"].items():
     log.info(f"[After translation] object {obj_name} position: {obj_pos['pos']} | rotation: {obj_pos['rot']}")
 
 
@@ -280,7 +280,9 @@ os.makedirs("get_started/output", exist_ok=True)
 
 
 ## Main loop
-obs_saver = ObsSaver(video_path=f"get_started/output/motion_planning/3_object_grasping_vlm/{task_name}_{object_name}_{args.sim}.mp4")
+obs_saver = ObsSaver(
+    video_path=f"get_started/output/motion_planning/3_object_grasping_vlm/{task_name}_{object_name}_{args.sim}.mp4"
+)
 obs_saver.add(obs)
 
 
@@ -290,7 +292,9 @@ def get_point_cloud_from_obs(obs, save_pcd=False):
     depth = obs.cameras["camera0"].depth
     # load img2 and depth2 to tensor
     img2 = torch.from_numpy(np.load("get_started/output/motion_planning/3_object_grasping_vlm/img2.npy")).unsqueeze(0)
-    depth2 = torch.from_numpy(np.load("get_started/output/motion_planning/3_object_grasping_vlm/depth2.npy")).unsqueeze(0)
+    depth2 = torch.from_numpy(np.load("get_started/output/motion_planning/3_object_grasping_vlm/depth2.npy")).unsqueeze(
+        0
+    )
     # check shapes
     log.info(f"img shape: {img.shape}, depth shape: {depth.shape}")
     log.info(f"img2 shape: {img2.shape}, depth2 shape: {depth2.shape}")
@@ -301,17 +305,17 @@ def get_point_cloud_from_obs(obs, save_pcd=False):
     img_path = "get_started/output/motion_planning/3_object_grasping_vlm/img.png"
     depth_path = "get_started/output/motion_planning/3_object_grasping_vlm/depth.png"
     max_depth = np.max(depth[0].cpu().numpy())
-    scene_depth = depth / max_depth * 255.0 # normalize depth to [0, 1]
+    scene_depth = depth / max_depth * 255.0  # normalize depth to [0, 1]
     scene_img = Image.fromarray(img[0].cpu().numpy())
-    scene_depth = Image.fromarray((scene_depth[0].squeeze(-1).cpu().numpy() / max_depth * 255.0).astype('uint8'))
+    scene_depth = Image.fromarray((scene_depth[0].squeeze(-1).cpu().numpy() / max_depth * 255.0).astype("uint8"))
     scene_img.save(img_path)
     scene_depth.save(depth_path)
     img2_path = "get_started/output/motion_planning/3_object_grasping_vlm/img2.png"
     depth2_path = "get_started/output/motion_planning/3_object_grasping_vlm/depth2.png"
     max_depth2 = np.max(depth2[0].cpu().numpy())
-    scene_depth2 = depth2 / max_depth2 * 255.0 # normalize depth to [0, 1]
+    scene_depth2 = depth2 / max_depth2 * 255.0  # normalize depth to [0, 1]
     scene_img2 = Image.fromarray(img2[0].cpu().numpy())
-    scene_depth2 = Image.fromarray((scene_depth2[0].squeeze(-1).cpu().numpy() / max_depth2 * 255.0).astype('uint8'))
+    scene_depth2 = Image.fromarray((scene_depth2[0].squeeze(-1).cpu().numpy() / max_depth2 * 255.0).astype("uint8"))
     scene_img2.save(img2_path)
     scene_depth2.save(depth2_path)
     #######################################################################
@@ -349,15 +353,16 @@ def get_point_cloud_from_obs(obs, save_pcd=False):
     # 2. Apply the transformation matrix to the second viewpoint
     # 3. Merge the two point clouds
     # 4. Save the merged point cloud
-    reg = o3d.pipelines.registration.registration_icp(pcd2, pcd, 0.0025, np.eye(4), o3d.pipelines.registration.TransformationEstimationPointToPlane())
-
+    reg = o3d.pipelines.registration.registration_icp(
+        pcd2, pcd, 0.0025, np.eye(4), o3d.pipelines.registration.TransformationEstimationPointToPlane()
+    )
 
     # Convert to numpy arrays
-    pts1 = np.asarray(pcd.points)         # shape (N, 3)
-    pts2 = np.asarray(pcd2.points)        # shape (M, 3)
+    pts1 = np.asarray(pcd.points)  # shape (N, 3)
+    pts2 = np.asarray(pcd2.points)  # shape (M, 3)
 
     # Apply transformation to pcd2
-    T = reg.transformation                # shape (4, 4)
+    T = reg.transformation  # shape (4, 4)
     pts2_h = np.hstack((pts2, np.ones((pts2.shape[0], 1))))  # shape (M, 4)
     pts2_transformed = (T @ pts2_h.T).T[:, :3]
 
@@ -398,7 +403,7 @@ def find_closest_grasp(target_point, grasp_group):
     if len(grasp_group) == 0:
         return None
 
-    min_distance = float('inf')
+    min_distance = float("inf")
     closest_grasp_idx = 0
 
     for i, grasp in enumerate(grasp_group):
@@ -458,6 +463,7 @@ def get_3d_point_from_pixel(pixel_point, depth, cam_intr_mat, cam_extr_mat):
     log.info(f"xyz: {xyz}")
     return xyz
 
+
 def find_closest_point_in_pcd(pcd, query_point):
     """
     Find the closest point in the Open3D point cloud to the given 3D point.
@@ -466,6 +472,7 @@ def find_closest_point_in_pcd(pcd, query_point):
     [_, idx, _] = pcd_tree.search_knn_vector_3d(query_point, 1)
     nearest_point = np.asarray(pcd.points)[idx[0]]
     return nearest_point
+
 
 def filter_out_robot_from_pcd(pcd: o3d.geometry.PointCloud) -> o3d.geometry.PointCloud:
     """
@@ -534,8 +541,9 @@ for step in range(1):
 
     # dummy for sleep?
     dummy_action = [
-            {"dof_pos_target": dict(zip(robot.actuators.keys(), [0.0] * len(robot.actuators.keys())))} for _ in range(scenario.num_envs)
-        ]
+        {"dof_pos_target": dict(zip(robot.actuators.keys(), [0.0] * len(robot.actuators.keys())))}
+        for _ in range(scenario.num_envs)
+    ]
     for _ in range(120):
         obs, _, _, _, _ = env.step(dummy_action)
     obs_saver.add(obs)
@@ -553,9 +561,11 @@ for step in range(1):
     points_array = np.array(pcd.points)
     colors_array = np.array(pcd.colors) if pcd.has_colors() else None
     log.info(f"Point cloud shape: {points_array.shape}")
-    log.info(f"Point cloud bounds: X[{points_array[:, 0].min():.3f}, {points_array[:, 0].max():.3f}], "
-             f"Y[{points_array[:, 1].min():.3f}, {points_array[:, 1].max():.3f}], "
-             f"Z[{points_array[:, 2].min():.3f}, {points_array[:, 2].max():.3f}]")
+    log.info(
+        f"Point cloud bounds: X[{points_array[:, 0].min():.3f}, {points_array[:, 0].max():.3f}], "
+        f"Y[{points_array[:, 1].min():.3f}, {points_array[:, 1].max():.3f}], "
+        f"Z[{points_array[:, 2].min():.3f}, {points_array[:, 2].max():.3f}]"
+    )
 
     points = np.array(pcd.points)
     # print("points shape:", points.shape)
@@ -574,9 +584,11 @@ for step in range(1):
     points_masked[:, 1] = -points_masked[:, 1]
     pcd.points = o3d.utility.Vector3dVector(points_masked)
     pcd.colors = o3d.utility.Vector3dVector(colors_masked)
-    log.info(f"New Point cloud bounds: X[{points_masked[:, 0].min():.3f}, {points_masked[:, 0].max():.3f}], "
-             f"Y[{points_masked[:, 1].min():.3f}, {points_masked[:, 1].max():.3f}], "
-             f"Z[{points_masked[:, 2].min():.3f}, {points_masked[:, 2].max():.3f}]")
+    log.info(
+        f"New Point cloud bounds: X[{points_masked[:, 0].min():.3f}, {points_masked[:, 0].max():.3f}], "
+        f"Y[{points_masked[:, 1].min():.3f}, {points_masked[:, 1].max():.3f}], "
+        f"Z[{points_masked[:, 2].min():.3f}, {points_masked[:, 2].max():.3f}]"
+    )
     gsnet = GSNet()
     gg = gsnet.inference(np.array(pcd.points))
     log.info(f"Total grasp candidates: {len(gg)}")
@@ -592,8 +604,9 @@ for step in range(1):
     pcd_clone1 = copy.deepcopy(pcd)
     gsnet.visualize(pcd_clone1, gg, image_only=True, save_dir="3_object_grasping_vlm", filename=f"{task_name}")
     pcd_clone2 = copy.deepcopy(pcd)
-    gsnet.visualize(pcd_clone2, gg[:1], image_only=True, save_dir="3_object_grasping_vlm", filename=f"gsnet_top_one_{task_name}")
-
+    gsnet.visualize(
+        pcd_clone2, gg[:1], image_only=True, save_dir="3_object_grasping_vlm", filename=f"gsnet_top_one_{task_name}"
+    )
 
     # # Qwen2.5-VL
     vlm_extractor = VLMPointExtractor()
@@ -608,12 +621,16 @@ for step in range(1):
         x, y = int(p[0]), int(p[1])
         radius = 8
         # Draw white border
-        draw.ellipse([x-radius-2, y-radius-2, x+radius+2, y+radius+2], fill="white", outline="black", width=2)
+        draw.ellipse(
+            [x - radius - 2, y - radius - 2, x + radius + 2, y + radius + 2], fill="white", outline="black", width=2
+        )
         # Draw red center
-        draw.ellipse([x-radius, y-radius, x+radius, y+radius], fill="red")
+        draw.ellipse([x - radius, y - radius, x + radius, y + radius], fill="red")
         # Add a small black dot in the center
-        draw.ellipse([x-2, y-2, x+2, y+2], fill="black")
-    img_with_point.save(f"get_started/output/motion_planning/3_object_grasping_vlm/img_with_point_{task_name}_{object_name}.png")
+        draw.ellipse([x - 2, y - 2, x + 2, y + 2], fill="black")
+    img_with_point.save(
+        f"get_started/output/motion_planning/3_object_grasping_vlm/img_with_point_{task_name}_{object_name}.png"
+    )
 
     # get 3d point of pixel (`point`) in the point cloud
     if len(point) > 0:
@@ -641,7 +658,13 @@ for step in range(1):
         selected_gg = gg[closest_grasp]
         log.info(f"Selected grasp based on VLM detection: grasp #{closest_grasp}")
         pcd_clone3 = copy.deepcopy(pcd)
-        gsnet.visualize(pcd_clone3, gg[closest_grasp:closest_grasp+1], image_only=True, save_dir="3_object_grasping_vlm", filename=f"qwen2.5vl_top_one_{task_name}_{object_name}")
+        gsnet.visualize(
+            pcd_clone3,
+            gg[closest_grasp : closest_grasp + 1],
+            image_only=True,
+            save_dir="3_object_grasping_vlm",
+            filename=f"qwen2.5vl_top_one_{task_name}_{object_name}",
+        )
 
     else:
         selected_gg = gg[0]  # Use best scoring grasp
@@ -660,9 +683,8 @@ for step in range(1):
 
     # position[0] = robot_offset-position[0]
 
-    position[0] = robot_offset-position[0]
+    position[0] = robot_offset - position[0]
     position[1] = -position[1]
-
 
     # Add robot position offset since robot is now at (robot_offset, 0, 0)
     log.info(f"After coordinate flip + robot offset - position: {position}")
@@ -711,7 +733,7 @@ for step in range(1):
     rotation = rotation_target @ rotation_transform_for_franka
 
     quat = R.from_matrix(rotation).as_quat()
-    quat *= np.array([1., -1., -1., 1.])
+    quat *= np.array([1.0, -1.0, -1.0, 1.0])
 
     ee_pos_target = torch.zeros((args.num_envs, 3), device="cuda:0")
     ee_quat_target = torch.zeros((args.num_envs, 4), device="cuda:0")
