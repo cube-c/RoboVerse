@@ -90,7 +90,6 @@ class VLMPointExtractor:
             generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )[0]
 
-        # log.info(f"Qwen2.5-VL output: {output_text}")
         point = self._extract_points_from_text(output_text, img.width, img.height)
         log.info(f"Qwen2.5-VL point: {point}")
         return point
@@ -185,17 +184,9 @@ robot = get_robot(args.robot)
 robot_offset = 1.15
 
 # default
-camera = PinholeCameraCfg(width=1024, height=1024, pos=(0.0, 0.0, 0.8), look_at=(0.9, 0.0, 0.0))
-camera2 = PinholeCameraCfg(width=1024, height=1024, pos=(0.9, 1.0, 0.6), look_at=(0.9, 0.0, 0.0))
-log.info(f"Camera position: {camera.pos}")
-log.info(f"Camera look_at: {camera.look_at}")
-
-log.info(f"Camera2 position: {camera2.pos}")
-log.info(f"Camera2 look_at: {camera2.look_at}")
-
 scenario = ScenarioCfg(
     task=task_name,
-    cameras=[camera],
+    cameras=[PinholeCameraCfg(width=1024, height=1024, pos=(0.0, 0.0, 0.8), look_at=(0.9, 0.0, 0.0))],
     robots=[args.robot],
     try_add_table=False,
     sim=args.sim,
@@ -205,7 +196,7 @@ scenario = ScenarioCfg(
 
 scenario2 = ScenarioCfg(
     task=task_name,
-    cameras=[camera2],
+    cameras=[PinholeCameraCfg(width=1024, height=1024, pos=(0.9, 1.0, 0.6), look_at=(0.9, 0.0, 0.0))],
     robots=[args.robot],
     try_add_table=False,
     sim=args.sim,
@@ -286,39 +277,16 @@ obs_saver = ObsSaver(
 obs_saver.add(obs)
 
 
-def get_point_cloud_from_obs(obs, save_pcd=False):
+def get_point_cloud_from_camera(img, depth, scenario, output_suffix=""):
     """Get the point cloud from the observation."""
-    img = obs.cameras["camera0"].rgb
-    depth = obs.cameras["camera0"].depth
-    # load img2 and depth2 to tensor
-    img2 = torch.from_numpy(np.load("get_started/output/motion_planning/3_object_grasping_vlm/img2.npy")).unsqueeze(0)
-    depth2 = torch.from_numpy(np.load("get_started/output/motion_planning/3_object_grasping_vlm/depth2.npy")).unsqueeze(
-        0
-    )
-    # check shapes
     log.info(f"img shape: {img.shape}, depth shape: {depth.shape}")
-    log.info(f"img2 shape: {img2.shape}, depth2 shape: {depth2.shape}")
-    ########################################################################
-    # save img and depth as png
-    # os.makedirs("get_started/output/motion_planning/3_object_grasping_vlm", exist_ok=True)
-    # print(f"img shape: {img.shape}, depth shape: {depth.shape}")
-    img_path = "get_started/output/motion_planning/3_object_grasping_vlm/img.png"
-    depth_path = "get_started/output/motion_planning/3_object_grasping_vlm/depth.png"
     max_depth = np.max(depth[0].cpu().numpy())
     scene_depth = depth / max_depth * 255.0  # normalize depth to [0, 1]
     scene_img = Image.fromarray(img[0].cpu().numpy())
     scene_depth = Image.fromarray((scene_depth[0].squeeze(-1).cpu().numpy() / max_depth * 255.0).astype("uint8"))
-    scene_img.save(img_path)
-    scene_depth.save(depth_path)
-    img2_path = "get_started/output/motion_planning/3_object_grasping_vlm/img2.png"
-    depth2_path = "get_started/output/motion_planning/3_object_grasping_vlm/depth2.png"
-    max_depth2 = np.max(depth2[0].cpu().numpy())
-    scene_depth2 = depth2 / max_depth2 * 255.0  # normalize depth to [0, 1]
-    scene_img2 = Image.fromarray(img2[0].cpu().numpy())
-    scene_depth2 = Image.fromarray((scene_depth2[0].squeeze(-1).cpu().numpy() / max_depth2 * 255.0).astype("uint8"))
-    scene_img2.save(img2_path)
-    scene_depth2.save(depth2_path)
-    #######################################################################
+    scene_img.save(f"get_started/output/motion_planning/3_object_grasping_vlm/img{output_suffix}.png")
+    scene_depth.save(f"get_started/output/motion_planning/3_object_grasping_vlm/depth{output_suffix}.png")
+
     extr, intr = get_cam_params(
         cam_pos=torch.tensor([scenario.cameras[i].pos for i in range(len(scenario.cameras))]),
         cam_look_at=torch.tensor([scenario.cameras[i].look_at for i in range(len(scenario.cameras))]),
@@ -327,25 +295,15 @@ def get_point_cloud_from_obs(obs, save_pcd=False):
         focal_length=scenario.cameras[0].focal_length,
         horizontal_aperture=scenario.cameras[0].horizontal_aperture,
     )
-
-    extr2, intr2 = get_cam_params(
-        cam_pos=torch.tensor([scenario2.cameras[i].pos for i in range(len(scenario2.cameras))]),
-        cam_look_at=torch.tensor([scenario2.cameras[i].look_at for i in range(len(scenario2.cameras))]),
-        width=scenario2.cameras[0].width,
-        height=scenario2.cameras[0].height,
-        focal_length=scenario2.cameras[0].focal_length,
-        horizontal_aperture=scenario2.cameras[0].horizontal_aperture,
-    )
-
     pcd = get_pcd_from_rgbd(depth.cpu()[0], img.cpu()[0], intr[0], extr[0])
-    pcd2 = get_pcd_from_rgbd(depth2.cpu()[0], img2.cpu()[0], intr2[0], extr2[0])
-
-    # Estimate normals for both point clouds
     pcd.estimate_normals()
-    pcd2.estimate_normals()
-    # info pcd and pcd2 shape
-    log.info(f"pcd shape: {np.array(pcd.points).shape}, pcd2 shape: {np.array(pcd2.points).shape}")
+    log.info(f"pcd shape: {np.array(pcd.points).shape}")
+    return pcd, intr, extr
 
+
+def get_point_cloud_from_obs(obs, save_pcd=False):
+    # check shapes
+    #######################################################################
     # merge pcds
     # before merging, we need to align the two point clouds
     # Align the second viewpoint to the first viewpoint
@@ -353,12 +311,23 @@ def get_point_cloud_from_obs(obs, save_pcd=False):
     # 2. Apply the transformation matrix to the second viewpoint
     # 3. Merge the two point clouds
     # 4. Save the merged point cloud
+    depth = obs.cameras["camera0"].depth
+    pcd1, intr, extr = get_point_cloud_from_camera(
+        obs.cameras["camera0"].rgb, obs.cameras["camera0"].depth, scenario, output_suffix="1"
+    )
+    pcd2, _, _ = get_point_cloud_from_camera(
+        torch.from_numpy(np.load("get_started/output/motion_planning/3_object_grasping_vlm/img2.npy")).unsqueeze(0),
+        torch.from_numpy(np.load("get_started/output/motion_planning/3_object_grasping_vlm/depth2.npy")).unsqueeze(0),
+        scenario2,
+        output_suffix="2",
+    )
+
     reg = o3d.pipelines.registration.registration_icp(
-        pcd2, pcd, 0.0025, np.eye(4), o3d.pipelines.registration.TransformationEstimationPointToPlane()
+        pcd2, pcd1, 0.0025, np.eye(4), o3d.pipelines.registration.TransformationEstimationPointToPlane()
     )
 
     # Convert to numpy arrays
-    pts1 = np.asarray(pcd.points)  # shape (N, 3)
+    pts1 = np.asarray(pcd1.points)  # shape (N, 3)
     pts2 = np.asarray(pcd2.points)  # shape (M, 3)
 
     # Apply transformation to pcd2
@@ -366,26 +335,18 @@ def get_point_cloud_from_obs(obs, save_pcd=False):
     pts2_h = np.hstack((pts2, np.ones((pts2.shape[0], 1))))  # shape (M, 4)
     pts2_transformed = (T @ pts2_h.T).T[:, :3]
 
-    pts1 = np.asarray(pcd.points)
+    pts1 = np.asarray(pcd1.points)
     all_points = np.vstack((pts1, pts2_transformed))
 
-    colors1 = np.asarray(pcd.colors)
+    colors1 = np.asarray(pcd1.colors)
     colors2 = np.asarray(pcd2.colors)
     all_colors = np.vstack((colors1, colors2))
 
     pcd_merged = o3d.geometry.PointCloud()
     pcd_merged.points = o3d.utility.Vector3dVector(all_points)
     pcd_merged.colors = o3d.utility.Vector3dVector(all_colors)
-
-    # pcd_merged = o3d.geometry.PointCloud()
-    # pcd_merged.points = o3d.utility.Vector3dVector(np.concatenate([np.array(pcd.points), np.array(reg.transformation @ pcd2.points)], axis=0))
-    # pcd_merged.colors = o3d.utility.Vector3dVector(np.concatenate([np.array(pcd.colors), np.array(pcd2.colors)], axis=0))
     o3d.io.write_point_cloud("get_started/output/motion_planning/3_object_grasping_vlm/pcd_merged.ply", pcd_merged)
 
-    # print(pcd)
-    # if save_pcd:
-    #     convert_to_ply(np.array(pcd.points), "get_started/output/motion_planning/3_object_grasping_vlm.ply")
-    # return pcd, depth[0], intr[0], extr[0]
     return pcd_merged, depth[0], intr[0], extr[0]
 
 
