@@ -186,17 +186,10 @@ robot_offset = 1.15
 # default
 scenario = ScenarioCfg(
     task=task_name,
-    cameras=[PinholeCameraCfg(width=1024, height=1024, pos=(0.0, 0.0, 0.8), look_at=(0.9, 0.0, 0.0))],
-    robots=[args.robot],
-    try_add_table=False,
-    sim=args.sim,
-    headless=args.headless,
-    num_envs=args.num_envs,
-)
-
-scenario2 = ScenarioCfg(
-    task=task_name,
-    cameras=[PinholeCameraCfg(width=1024, height=1024, pos=(0.9, 1.0, 0.6), look_at=(0.9, 0.0, 0.0))],
+    cameras=[
+        PinholeCameraCfg(name="camera0", width=1024, height=1024, pos=(0.0, 0.0, 0.8), look_at=(0.9, 0.0, 0.0)),
+        PinholeCameraCfg(name="camera1", width=1024, height=1024, pos=(0.9, 1.0, 0.6), look_at=(0.9, 0.0, 0.0)),
+    ],
     robots=[args.robot],
     try_add_table=False,
     sim=args.sim,
@@ -277,7 +270,7 @@ obs_saver = ObsSaver(
 obs_saver.add(obs)
 
 
-def get_point_cloud_from_camera(img, depth, scenario, output_suffix=""):
+def get_point_cloud_from_camera(img, depth, camera, output_suffix=""):
     """Get the point cloud from the observation."""
     log.info(f"img shape: {img.shape}, depth shape: {depth.shape}")
     max_depth = np.max(depth[0].cpu().numpy())
@@ -288,12 +281,12 @@ def get_point_cloud_from_camera(img, depth, scenario, output_suffix=""):
     scene_depth.save(f"get_started/output/motion_planning/3_object_grasping_vlm/depth{output_suffix}.png")
 
     extr, intr = get_cam_params(
-        cam_pos=torch.tensor([scenario.cameras[i].pos for i in range(len(scenario.cameras))]),
-        cam_look_at=torch.tensor([scenario.cameras[i].look_at for i in range(len(scenario.cameras))]),
-        width=scenario.cameras[0].width,
-        height=scenario.cameras[0].height,
-        focal_length=scenario.cameras[0].focal_length,
-        horizontal_aperture=scenario.cameras[0].horizontal_aperture,
+        cam_pos=torch.tensor([camera.pos]),
+        cam_look_at=torch.tensor([camera.look_at]),
+        width=camera.width,
+        height=camera.height,
+        focal_length=camera.focal_length,
+        horizontal_aperture=camera.horizontal_aperture,
     )
     pcd = get_pcd_from_rgbd(depth.cpu()[0], img.cpu()[0], intr[0], extr[0])
     pcd.estimate_normals()
@@ -313,13 +306,10 @@ def get_point_cloud_from_obs(obs, save_pcd=False):
     # 4. Save the merged point cloud
     depth = obs.cameras["camera0"].depth
     pcd1, intr, extr = get_point_cloud_from_camera(
-        obs.cameras["camera0"].rgb, obs.cameras["camera0"].depth, scenario, output_suffix="1"
+        obs.cameras["camera0"].rgb, obs.cameras["camera0"].depth, scenario.cameras[0], output_suffix="1"
     )
     pcd2, _, _ = get_point_cloud_from_camera(
-        torch.from_numpy(np.load("get_started/output/motion_planning/3_object_grasping_vlm/img2.npy")).unsqueeze(0),
-        torch.from_numpy(np.load("get_started/output/motion_planning/3_object_grasping_vlm/depth2.npy")).unsqueeze(0),
-        scenario2,
-        output_suffix="2",
+        obs.cameras["camera1"].rgb, obs.cameras["camera1"].depth, scenario.cameras[1], output_suffix="2"
     )
 
     reg = o3d.pipelines.registration.registration_icp(
