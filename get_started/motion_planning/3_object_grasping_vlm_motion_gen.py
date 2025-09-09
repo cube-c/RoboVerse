@@ -52,7 +52,7 @@ from metasim.constants import SimType
 from metasim.utils import configclass
 from metasim.utils.camera_util import get_cam_params
 from metasim.utils.demo_util import get_traj
-from metasim.utils.kinematics_utils import get_curobo_models, get_curobo_models_with_pcd
+from metasim.utils.kinematics_utils import get_curobo_models_with_pcd
 from metasim.utils.setup_util import get_robot, get_sim_env_class, get_task
 
 
@@ -152,122 +152,63 @@ class VLMPointExtractor:
         return all_points
 
 
-@configclass
-class Args:
-    """Arguments for the static scene."""
+def get_environment(scenario, robot, sim="isaaclab", robot_offset=1.15):
+    """Initialize the simulation environment."""
+    log.info(f"Using simulator: {sim}")
+    env_class = get_sim_env_class(SimType(sim))
+    env = env_class(scenario)
 
-    robot: str = "franka"
+    init_states, _, _ = get_traj(task, robot, env.handler)
 
-    ## Handlers
-    sim: Literal["isaaclab", "isaacgym", "genesis", "pybullet", "sapien2", "sapien3", "mujoco"] = "isaaclab"
+    log.info(
+        f"robot position: {init_states[0]['robots'][robot.name]['pos']} | rotation: {init_states[0]['robots'][robot.name]['rot']}"
+    )
+    # log all objects position
+    for obj_name, obj_pos in init_states[0]["objects"].items():
+        log.info(f"object {obj_name} position: {obj_pos['pos']} | rotation: {obj_pos['rot']}")
 
-    ## Others
-    num_envs: int = 1
-    headless: bool = False
-    task_name: str = "LiberoPickChocolatePudding"
-    object_name: str = "BBQ sauce"
+    # translate robot and all objects to make robot at the origin
+    robot_pos = init_states[0]["robots"][robot.name]["pos"]
+    for obj_name, obj_pos in init_states[0]["objects"].items():
+        init_states[0]["objects"][obj_name]["pos"] -= robot_pos
+    init_states[0]["robots"][robot.name]["pos"] = torch.tensor([0.0, 0.0, 0.0])
 
-    def __post_init__(self):
-        """Post-initialization configuration."""
-        log.info(f"Args: {self}")
+    # translate robot to (3.0, 0.0, 0.0) and rotate 180 degrees around z axis
+    init_states[0]["robots"][robot.name]["pos"] = torch.tensor([robot_offset, 0.0, 0.0])
+    init_states[0]["robots"][robot.name]["rot"] = torch.tensor([0.0, 0.0, 0.0, 1.0])
+    # translate/rotate all objects relative to robot
+    q_z_180 = torch.tensor([0.0, 1.0, 0.0, 0.0])
+    q_x_180 = torch.tensor([1.0, 0.0, 0.0, 0.0])
 
-
-args = tyro.cli(Args)
-
-
-# initialize scenario
-task_name = args.task_name
-object_name = args.object_name
-
-task = get_task(task_name)
-robot = get_robot(args.robot)
-robot_offset = 1.15
-
-# default
-scenario = ScenarioCfg(
-    task=task_name,
-    cameras=[
-        PinholeCameraCfg(name="camera0", width=1024, height=1024, pos=(0.0, 0.0, 0.8), look_at=(0.9, 0.0, 0.0)),
-        PinholeCameraCfg(name="camera1", width=1024, height=1024, pos=(0.9, 1.0, 0.6), look_at=(0.9, 0.0, 0.0)),
-    ],
-    robots=[args.robot],
-    try_add_table=False,
-    sim=args.sim,
-    headless=args.headless,
-    num_envs=args.num_envs,
-)
-
-log.info(f"Using simulator: {args.sim}")
-env_class = get_sim_env_class(SimType(args.sim))
-env = env_class(scenario)
-
-init_states, _, _ = get_traj(task, robot, env.handler)
-
-log.info(
-    f"robot position: {init_states[0]['robots'][robot.name]['pos']} | rotation: {init_states[0]['robots'][robot.name]['rot']}"
-)
-# log all objects position
-for obj_name, obj_pos in init_states[0]["objects"].items():
-    log.info(f"object {obj_name} position: {obj_pos['pos']} | rotation: {obj_pos['rot']}")
-# log.info(f"")
-
-# translate robot and all objects to make robot at the origin
-robot_pos = init_states[0]["robots"][robot.name]["pos"]
-for obj_name, obj_pos in init_states[0]["objects"].items():
-    init_states[0]["objects"][obj_name]["pos"] -= robot_pos
-init_states[0]["robots"][robot.name]["pos"] = torch.tensor([0.0, 0.0, 0.0])
-
-# translate robot to (3.0, 0.0, 0.0) and rotate 180 degrees around z axis
-init_states[0]["robots"][robot.name]["pos"] = torch.tensor([robot_offset, 0.0, 0.0])
-init_states[0]["robots"][robot.name]["rot"] = torch.tensor([0.0, 0.0, 0.0, 1.0])
-# translate/rotate all objects relative to robot
-q_z_180 = torch.tensor([0.0, 1.0, 0.0, 0.0])
-q_x_180 = torch.tensor([1.0, 0.0, 0.0, 0.0])
-# Convert existing quaternion to scipy Rotation
-# r_existing = R.from_quat(q_existing)
-for obj_name, obj_pos in init_states[0]["objects"].items():
-    init_states[0]["objects"][obj_name]["pos"][0] = robot_offset - init_states[0]["objects"][obj_name]["pos"][0] + 0.05
-    init_states[0]["objects"][obj_name]["pos"][1] = -init_states[0]["objects"][obj_name]["pos"][1]
-    # print((R.from_quat(q_z_180) * R.from_quat(init_states[0]['objects'][obj_name]['rot'])).as_quat())
-    if obj_name == "ketchup" or obj_name == "salad_dressing":
-        init_states[0]["objects"][obj_name]["rot"] = torch.tensor(
-            (R.from_quat(q_z_180) * R.from_quat(init_states[0]["objects"][obj_name]["rot"])).as_quat()
+    for obj_name, obj_pos in init_states[0]["objects"].items():
+        init_states[0]["objects"][obj_name]["pos"][0] = (
+            robot_offset - init_states[0]["objects"][obj_name]["pos"][0] + 0.05
         )
-    if obj_name == "bbq_sauce":
-        init_states[0]["objects"][obj_name]["rot"] = torch.tensor(
-            (R.from_quat(q_x_180) * R.from_quat(init_states[0]["objects"][obj_name]["rot"])).as_quat()
-        )
-    # init_states[0]['objects'][obj_name]['rot'][-1] = -init_states[0]['objects'][obj_name]['rot'][-1]
+        init_states[0]["objects"][obj_name]["pos"][1] = -init_states[0]["objects"][obj_name]["pos"][1]
+        if obj_name == "ketchup" or obj_name == "salad_dressing":
+            init_states[0]["objects"][obj_name]["rot"] = torch.tensor(
+                (R.from_quat(q_z_180) * R.from_quat(init_states[0]["objects"][obj_name]["rot"])).as_quat()
+            )
+        if obj_name == "bbq_sauce":
+            init_states[0]["objects"][obj_name]["rot"] = torch.tensor(
+                (R.from_quat(q_x_180) * R.from_quat(init_states[0]["objects"][obj_name]["rot"])).as_quat()
+            )
 
-log.info(
-    f"[After translation] robot position: {init_states[0]['robots'][robot.name]['pos']} | rotation: {init_states[0]['robots'][robot.name]['rot']}"
-)
-for obj_name, obj_pos in init_states[0]["objects"].items():
-    log.info(f"[After translation] object {obj_name} position: {obj_pos['pos']} | rotation: {obj_pos['rot']}")
+    log.info(
+        f"[After translation] robot position: {init_states[0]['robots'][robot.name]['pos']} | rotation: {init_states[0]['robots'][robot.name]['rot']}"
+    )
+    for obj_name, obj_pos in init_states[0]["objects"].items():
+        log.info(f"[After translation] object {obj_name} position: {obj_pos['pos']} | rotation: {obj_pos['rot']}")
 
+    robot = scenario.robots[0]
+    robot.default_position = torch.tensor([robot_offset, 0.0, 0.0])
+    robot.default_orientation = torch.tensor([0.0, 0.0, 0.0, 1.0])
 
-robot = scenario.robots[0]
-robot.default_position = torch.tensor([robot_offset, 0.0, 0.0])
-robot.default_orientation = torch.tensor([0.0, 0.0, 0.0, 1.0])
+    init_states[0]["robots"][robot.name]["dof_pos"]["panda_finger_joint1"] = 0.04
+    init_states[0]["robots"][robot.name]["dof_pos"]["panda_finger_joint2"] = 0.04
 
-_, _, robot_ik = get_curobo_models(robot, no_gnd=True)
-curobo_n_dof = len(robot_ik.robot_config.cspace.joint_names)
-ee_n_dof = len(robot.gripper_open_q)
-
-init_states[0]["robots"][robot.name]["dof_pos"]["panda_finger_joint1"] = 0.04
-init_states[0]["robots"][robot.name]["dof_pos"]["panda_finger_joint2"] = 0.04
-
-log.debug(init_states[0:1])
-
-obs, extras = env.reset(states=init_states[0:1])
-os.makedirs("get_started/output", exist_ok=True)
-
-
-## Main loop
-obs_saver = ObsSaver(
-    video_path=f"get_started/output/motion_planning/3_object_grasping_vlm/{task_name}_{object_name}_{args.sim}.mp4"
-)
-obs_saver.add(obs)
+    obs, _ = env.reset(states=init_states[0:1])
+    return obs, env
 
 
 def get_point_cloud_from_camera(img, depth, camera, output_suffix=""):
@@ -454,6 +395,9 @@ def move_to_pose(
     obs, obs_saver, robot_ik, robot, scenario, ee_pos_target, ee_quat_target, steps=10, open_gripper=False
 ):
     """Move the robot to the target pose."""
+    curobo_n_dof = len(robot_ik.robot_config.cspace.joint_names)
+    ee_n_dof = len(robot.gripper_open_q)
+
     curr_robot_q = obs.robots[robot.name].joint_pos
     log.debug(f"Current robot q: {curr_robot_q}")
 
@@ -485,6 +429,61 @@ def move_to_pose(
     return obs
 
 
+@configclass
+class Args:
+    """Arguments for the static scene."""
+
+    robot: str = "franka"
+
+    ## Handlers
+    sim: Literal["isaaclab", "isaacgym", "genesis", "pybullet", "sapien2", "sapien3", "mujoco"] = "isaaclab"
+
+    ## Others
+    num_envs: int = 1
+    headless: bool = False
+    task_name: str = "LiberoPickChocolatePudding"
+    object_name: str = "BBQ sauce"
+
+    def __post_init__(self):
+        """Post-initialization configuration."""
+        log.info(f"Args: {self}")
+
+
+args = tyro.cli(Args)
+
+
+# initialize scenario
+task_name = args.task_name
+object_name = args.object_name
+
+task = get_task(task_name)
+robot = get_robot(args.robot)
+robot_offset = 1.15
+
+# default
+scenario = ScenarioCfg(
+    task=task_name,
+    cameras=[
+        PinholeCameraCfg(name="camera0", width=1024, height=1024, pos=(0.0, 0.0, 0.8), look_at=(0.9, 0.0, 0.0)),
+        PinholeCameraCfg(name="camera1", width=1024, height=1024, pos=(0.9, 1.0, 0.6), look_at=(0.9, 0.0, 0.0)),
+    ],
+    robots=[args.robot],
+    try_add_table=False,
+    sim=args.sim,
+    headless=args.headless,
+    num_envs=args.num_envs,
+)
+
+obs, env = get_environment(scenario, robot, sim=args.sim)
+
+## Main loop
+os.makedirs("get_started/output", exist_ok=True)
+obs_saver = ObsSaver(
+    video_path=f"get_started/output/motion_planning/3_object_grasping_vlm/{task_name}_{object_name}_{args.sim}.mp4"
+)
+obs_saver.add(obs)
+
+
 step = 0
 robot_joint_limits = scenario.robots[0].joint_limits
 for step in range(1):
@@ -505,8 +504,6 @@ for step in range(1):
     pcd, depth, cam_intr_mat, cam_extr_mat = get_point_cloud_from_obs(obs)
     pcd = filter_out_robot_from_pcd(pcd)
     *_, robot_ik = get_curobo_models_with_pcd(pcd, robot)
-
-    seed_config = curr_robot_q[:, :curobo_n_dof].unsqueeze(1).tile([1, robot_ik._num_seeds, 1])
 
     # Method 5: Print point cloud statistics
     points_array = np.array(pcd.points)
@@ -631,8 +628,6 @@ for step in range(1):
 
     position[2] = -position[2]
     position[1] = -position[1]
-
-    # position[0] = robot_offset-position[0]
 
     position[0] = robot_offset - position[0]
     position[1] = -position[1]
