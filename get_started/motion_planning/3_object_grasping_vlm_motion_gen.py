@@ -35,6 +35,10 @@ from loguru import logger as log
 from rich.logging import RichHandler
 
 from curobo.types.math import Pose
+from curobo.types.robot import JointState
+from curobo.types.state import JointState
+from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenPlanConfig
+from metasim.sim import IdentityEnvWrapper
 
 rootutils.setup_root(__file__, pythonpath=True)
 log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
@@ -53,7 +57,7 @@ from metasim.utils import configclass
 from metasim.utils.camera_util import get_cam_params
 from metasim.utils.demo_util import get_traj
 from metasim.utils.kinematics_utils import get_curobo_models_with_pcd
-from metasim.utils.setup_util import get_robot, get_sim_env_class, get_task
+from metasim.utils.setup_util import get_sim_env_class, get_task
 
 
 class VLMPointExtractor:
@@ -158,6 +162,7 @@ class GraspPoseFinder:
 
     def find(self, pcd: o3d.geometry.PointCloud):
         points = np.array(pcd.points)
+        colors = np.array(pcd.colors)
         log.info(f"Point cloud shape: {points.shape}")
         log.info(
             f"Point cloud bounds: X[{points[:, 0].min():.3f}, {points[:, 0].max():.3f}], "
@@ -177,13 +182,16 @@ class GraspPoseFinder:
         points_masked = points[point_mask]
         points_masked[:, 2] = -points_masked[:, 2]
         points_masked[:, 1] = -points_masked[:, 1]
+        colors_masked = colors[point_mask]
         log.info(
             f"New Point cloud bounds: X[{points_masked[:, 0].min():.3f}, {points_masked[:, 0].max():.3f}], "
             f"Y[{points_masked[:, 1].min():.3f}, {points_masked[:, 1].max():.3f}], "
             f"Z[{points_masked[:, 2].min():.3f}, {points_masked[:, 2].max():.3f}]"
         )
-        points_masked = o3d.utility.Vector3dVector(points_masked)
-        grasps = self.gsnet.inference(np.array(points_masked))
+        pcd.points = o3d.utility.Vector3dVector(points_masked)
+        pcd.colors = o3d.utility.Vector3dVector(colors_masked)
+
+        grasps = self.gsnet.inference(np.array(pcd.points))
 
         # log best grasp candidate
         log.info(f"Total grasp candidates: {len(grasps)}")
@@ -207,51 +215,50 @@ def get_environment(scenario, sim="isaaclab", robot_offset=1.15):
     init_states, _, _ = get_traj(task, robot, env.handler)
     init_state = init_states[0]
 
-    init_robot = init_state["robots"][robot.name]
-    init_objects = init_state["objects"]
-
-    log.info(f"robot position: {init_robot['pos']} | rotation: {init_robot['rot']}")
+    log.info(
+        f"robot position: {init_state['robots'][robot.name]['pos']} | rotation: {init_state['robots'][robot.name]['rot']}"
+    )
     # log all objects position
-    for obj_name, obj_pos in init_objects.items():
+    for obj_name, obj_pos in init_state["objects"].items():
         log.info(f"object {obj_name} position: {obj_pos['pos']} | rotation: {obj_pos['rot']}")
 
     # translate robot and all objects to make robot at the origin
-    for obj_name, obj_pos in init_objects.items():
-        init_objects[obj_name]["pos"] -= init_robot["pos"]
+    for obj_name, obj_pos in init_state["objects"].items():
+        init_state["objects"][obj_name]["pos"] -= init_state["robots"][robot.name]["pos"]
 
     # translate robot to (robot_offset, 0.0, 0.0) and rotate 180 degrees around z axis
-    init_robot["pos"] = torch.tensor([robot_offset, 0.0, 0.0])
-    init_robot["rot"] = torch.tensor([0.0, 0.0, 0.0, 1.0])
+    init_state["robots"][robot.name]["pos"] = torch.tensor([robot_offset, 0.0, 0.0])
+    init_state["robots"][robot.name]["rot"] = torch.tensor([0.0, 0.0, 0.0, 1.0])
     # translate/rotate all objects relative to robot
     q_z_180 = torch.tensor([0.0, 1.0, 0.0, 0.0])
     q_x_180 = torch.tensor([1.0, 0.0, 0.0, 0.0])
 
-    for obj_name, obj_pos in init_objects.items():
-        init_objects[obj_name]["pos"][0] = robot_offset - init_objects[obj_name]["pos"][0] + 0.05
-        init_objects[obj_name]["pos"][1] = -init_objects[obj_name]["pos"][1]
+    for obj_name, obj_pos in init_state["objects"].items():
+        init_state["objects"][obj_name]["pos"][0] = robot_offset - init_state["objects"][obj_name]["pos"][0] + 0.05
+        init_state["objects"][obj_name]["pos"][1] = -init_state["objects"][obj_name]["pos"][1]
         if obj_name == "ketchup" or obj_name == "salad_dressing":
-            init_objects[obj_name]["rot"] = torch.tensor(
-                (R.from_quat(q_z_180) * R.from_quat(init_objects[obj_name]["rot"])).as_quat()
+            init_state["objects"][obj_name]["rot"] = torch.tensor(
+                (R.from_quat(q_z_180) * R.from_quat(init_state["objects"][obj_name]["rot"])).as_quat()
             )
         if obj_name == "bbq_sauce":
-            init_objects[obj_name]["rot"] = torch.tensor(
-                (R.from_quat(q_x_180) * R.from_quat(init_objects[obj_name]["rot"])).as_quat()
+            init_state["objects"][obj_name]["rot"] = torch.tensor(
+                (R.from_quat(q_x_180) * R.from_quat(init_state["objects"][obj_name]["rot"])).as_quat()
             )
 
     log.info(
         f"[After translation] robot position: {init_state['robots'][robot.name]['pos']} | rotation: {init_state['robots'][robot.name]['rot']}"
     )
-    for obj_name, obj_pos in init_objects.items():
+    for obj_name, obj_pos in init_state["objects"].items():
         log.info(f"[After translation] object {obj_name} position: {obj_pos['pos']} | rotation: {obj_pos['rot']}")
 
     robot.default_position = torch.tensor([robot_offset, 0.0, 0.0])
     robot.default_orientation = torch.tensor([0.0, 0.0, 0.0, 1.0])
 
-    init_robot["dof_pos"]["panda_finger_joint1"] = 0.04
-    init_robot["dof_pos"]["panda_finger_joint2"] = 0.04
+    init_state["robots"][robot.name]["dof_pos"]["panda_finger_joint1"] = 0.04
+    init_state["robots"][robot.name]["dof_pos"]["panda_finger_joint2"] = 0.04
 
-    obs, _ = env.reset(states=[init_state])
-    return obs, env
+    env.reset(states=[init_state])
+    return env
 
 
 def get_point_cloud_from_camera(img, depth, camera, output_suffix=""):
@@ -434,41 +441,67 @@ def filter_out_robot_from_pcd(pcd: o3d.geometry.PointCloud) -> o3d.geometry.Poin
     return pcd_filtered
 
 
-def move_to_pose(
-    obs, obs_saver, robot_ik, robot, scenario, ee_pos_target, ee_quat_target, steps=10, open_gripper=False
+def gripper_pose(
+    obs_saver: ObsSaver,
+    env: IdentityEnvWrapper,
+    open_gripper=False,
+    step=20,
 ):
-    """Move the robot to the target pose."""
-    curobo_n_dof = len(robot_ik.robot_config.cspace.joint_names)
+    """Get the gripper pose."""
+    robot = env.handler.robots[0]
+    joint_pos = env.handler.env.scene.articulations[robot.name].data.joint_pos.cuda()
     ee_n_dof = len(robot.gripper_open_q)
 
-    curr_robot_q = obs.robots[robot.name].joint_pos
-    log.debug(f"Current robot q: {curr_robot_q}")
-
-    seed_config = curr_robot_q[:, :curobo_n_dof].unsqueeze(1).tile([1, robot_ik._num_seeds, 1])
-
-    result = robot_ik.solve_batch(
-        Pose(ee_pos_target, ee_quat_target),
-        seed_config=seed_config,
-    )
-
-    q = torch.zeros((scenario.num_envs, robot.num_joints), device="cuda:0")
-    ik_succ = result.success.squeeze(1)
-    if not ik_succ.any():
-        log.debug("Failed to find feasible solution")
-        return obs
-    log.debug(f"Result robot q: {result.solution[ik_succ, 0]}")
-    q[ik_succ, :curobo_n_dof] = result.solution[ik_succ, 0].clone()
-
-    # open gripper
-    q[:, -ee_n_dof:] = 0.04 if open_gripper else 0.0
+    log.info(f"Current robot joint state: {joint_pos}")
+    joint_pos[:, -ee_n_dof:] = 0.04 if open_gripper else 0.0
 
     actions = [
-        {"dof_pos_target": dict(zip(robot.actuators.keys(), q[i_env].tolist()))} for i_env in range(scenario.num_envs)
+        {"dof_pos_target": dict(zip(robot.actuators.keys(), joint_pos[i_env].tolist()))}
+        for i_env in range(scenario.num_envs)
     ]
-    for i in range(steps):
+    log.info(f"Gripper actions: {actions}")
+    for _ in range(step):
         obs, _, _, _, _ = env.step(actions)
         obs_saver.add(obs)
-    return obs
+
+
+def move_to_pose(
+    obs_saver: ObsSaver,
+    env: IdentityEnvWrapper,
+    motion_gen: MotionGen,
+    plan_config: MotionGenPlanConfig,
+    ee_pos_target: torch.Tensor,
+    ee_quat_target: torch.Tensor,
+    steps=20,
+):
+    """Move the robot to the target pose."""
+    robot = env.handler.robots[0]
+    joint_pos = env.handler.env.scene.articulations[robot.name].data.joint_pos.cuda()
+    curobo_n_dof = len(motion_gen.kinematics.joint_names)
+
+    ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
+    log.info(f"Joint position : {joint_pos}")
+    log.info(f"Joint names: {motion_gen.kinematics.joint_names}")
+    cu_js = JointState.from_position(position=joint_pos, joint_names=list(robot.actuators.keys()))
+    cu_js = JointState.get_ordered_joint_state(cu_js, motion_gen.kinematics.joint_names)
+    log.info(f"Current robot joint state: {cu_js}")
+    result = motion_gen.plan_single(cu_js, ik_goal, plan_config)
+
+    succ = result.success.item()
+    if not succ:
+        log.debug("Failed to find feasible solution")
+        log.debug(f"Reason: {result}")
+        return
+
+    cmd_plan = result.get_interpolated_plan().position
+    for i in range(cmd_plan.shape[0]):
+        joint_pos[:, :curobo_n_dof] = cmd_plan[i : i + 1, :]
+        actions = [
+            {"dof_pos_target": dict(zip(robot.actuators.keys(), joint_pos[i_env]))}
+            for i_env in range(scenario.num_envs)
+        ]
+        obs, _, _, _, _ = env.step(actions)
+        obs_saver.add(obs)
 
 
 @configclass
@@ -516,27 +549,22 @@ scenario = ScenarioCfg(
 robot = scenario.robots[0]
 robot_offset = 1.15
 
-obs, env = get_environment(scenario, sim=args.sim)
+env = get_environment(scenario, sim=args.sim)
 
 ## Main loop
 os.makedirs("get_started/output", exist_ok=True)
 obs_saver = ObsSaver(
     video_path=f"get_started/output/motion_planning/3_object_grasping_vlm/{task_name}_{object_name}_{args.sim}.mp4"
 )
-obs_saver.add(obs)
 
 grasp_finder = GraspPoseFinder()
 
 step = 0
-robot_joint_limits = scenario.robots[0].joint_limits
 for step in range(1):
     log.debug(f"Step {step}")
 
-    # Warm up the environment by taking some dummy actions
-    dummy_action = [
-        {"dof_pos_target": dict(zip(robot.actuators.keys(), [0.0] * len(robot.actuators.keys())))}
-        for _ in range(scenario.num_envs)
-    ]
+    # Warm up the environment by taking some dummy actions with default joint positions
+    dummy_action = [{"dof_pos_target": robot.default_joint_positions} for _ in range(scenario.num_envs)]
     for _ in range(120):
         obs, _, _, _, _ = env.step(dummy_action)
     obs_saver.add(obs)
@@ -544,7 +572,7 @@ for step in range(1):
     # Get point cloud from observation
     pcd, depth, cam_intr_mat, cam_extr_mat = get_point_cloud_from_obs(obs)
     pcd = filter_out_robot_from_pcd(pcd)
-    *_, robot_ik = get_curobo_models_with_pcd(pcd, robot)
+    motion_gen, plan_config = get_curobo_models_with_pcd(pcd, robot)
 
     # remove file: /home/lukesong_google_com/RoboVerse/get_started/output/motion_planning/3_object_grasping_vlm/gsnet_visualization.png
     # if os.path.exists("get_started/output/motion_planning/3_object_grasping_vlm/gsnet_visualization_new.png"):
@@ -713,24 +741,17 @@ for step in range(1):
     # TODO: set hyperparameter for heuristic grasp posing
     pre_grasp_pos[:, 2] += 0.20
     lift_pos[:, 2] += 0.2
-    grasp_pos[:, 2] += 0.1
+    # grasp_pos[:, 2] += 0.1
     log.info(f"gripper_out: {gripper_out}")
     log.info(f"pre_grasp_pos: {pre_grasp_pos}")
     log.info(f"grasp_pos: {grasp_pos}")
 
     # TODO: line 965-971
-    obs = move_to_pose(
-        obs, obs_saver, robot_ik, robot, scenario, pre_grasp_pos, ee_quat_target, steps=50, open_gripper=True
-    )
-    obs = move_to_pose(
-        obs, obs_saver, robot_ik, robot, scenario, grasp_pos, ee_quat_target, steps=50, open_gripper=True
-    )
-    obs = move_to_pose(
-        obs, obs_saver, robot_ik, robot, scenario, grasp_pos, ee_quat_target, steps=50, open_gripper=False
-    )
-    obs = move_to_pose(
-        obs, obs_saver, robot_ik, robot, scenario, lift_pos, ee_quat_target, steps=50, open_gripper=False
-    )
+    gripper_pose(obs_saver, env, open_gripper=True, step=20)
+    move_to_pose(obs_saver, env, motion_gen, plan_config, pre_grasp_pos, ee_quat_target, steps=50)
+    move_to_pose(obs_saver, env, motion_gen, plan_config, grasp_pos, ee_quat_target, steps=50)
+    gripper_pose(obs_saver, env, open_gripper=False, step=40)
+    move_to_pose(obs_saver, env, motion_gen, plan_config, lift_pos, ee_quat_target, steps=50)
 
     step += 1
 
