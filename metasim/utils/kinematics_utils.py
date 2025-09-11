@@ -88,13 +88,13 @@ def get_curobo_models_with_pcd(pcd: o3d.geometry.PointCloud, robot_cfg: BaseRobo
         cuboid=[
             Cuboid(
                 name="ground",
-                pose=[0.0, 0.0, -1.4, 1.0, 0.0, 0.0, 0.0],
+                pose=[0.0, 0.0, -0.4, 1.0, 0.0, 0.0, 0.0],
                 dims=[10.0, 10.0, 0.8],
             ),
         ],
         # TODO: is there any better method (using nvblox?)
         # TODO: get robot position and quaternion from args and apply to mesh pose
-        # mesh=[Mesh.from_pointcloud(np.asarray(pcd.points), pose=[1.15, 0.0, 0.0, 0, 0, 0, 1], pitch=0.005)],
+        mesh=[Mesh.from_pointcloud(np.asarray(pcd.points), pose=[1.15, 0.0, 0.0, 0, 0, 0, 1], pitch=0.005)],
     )
     world_cfg.save_world_as_mesh("get_started/output/motion_planning/3_object_grasping_vlm/world.ply")
     motion_gen_config = MotionGenConfig.load_from_robot_config(
