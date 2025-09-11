@@ -88,7 +88,7 @@ def get_curobo_models_with_pcd(pcd: o3d.geometry.PointCloud, robot_cfg: BaseRobo
         cuboid=[
             Cuboid(
                 name="ground",
-                pose=[0.0, 0.0, -0.4, 1.0, 0.0, 0.0, 0.0],
+                pose=[0.0, 0.0, -1.4, 1.0, 0.0, 0.0, 0.0],
                 dims=[10.0, 10.0, 0.8],
             ),
         ],

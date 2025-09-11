@@ -56,7 +56,7 @@ from metasim.constants import SimType
 from metasim.utils import configclass
 from metasim.utils.camera_util import get_cam_params
 from metasim.utils.demo_util import get_traj
-from metasim.utils.kinematics_utils import get_curobo_models_with_pcd
+from metasim.utils.kinematics_utils import ee_pose_from_tcp_pose, get_curobo_models_with_pcd
 from metasim.utils.setup_util import get_sim_env_class, get_task
 
 
@@ -428,10 +428,13 @@ def filter_out_robot_from_pcd(pcd: o3d.geometry.PointCloud) -> o3d.geometry.Poin
 
     robot_offset = np.array([1.15, 0.0, 1.0])
     robot_dimension = np.array([0.3, 0.3, 2.0])  # x, y, z dimensions
-    point_mask = np.logical_or(
-        np.abs(points[:, 0] - robot_offset[0]) > robot_dimension[0] / 2,
-        np.abs(points[:, 1] - robot_offset[1]) > robot_dimension[1] / 2,
-        np.abs(points[:, 2] - robot_offset[2]) > robot_dimension[2] / 2,
+    point_mask = np.logical_and(
+        np.logical_or(
+            np.abs(points[:, 0] - robot_offset[0]) > robot_dimension[0] / 2,
+            np.abs(points[:, 1] - robot_offset[1]) > robot_dimension[1] / 2,
+            np.abs(points[:, 2] - robot_offset[2]) > robot_dimension[2] / 2,
+        ),
+        points[:, 2] < 0.3,
     )
     points_filtered = points[point_mask]
     colors_filtered = colors[point_mask]
@@ -491,7 +494,7 @@ def move_to_pose(
     if not succ:
         log.debug("Failed to find feasible solution")
         log.debug(f"Reason: {result}")
-        return
+        return False
 
     cmd_plan = result.get_interpolated_plan().position
     for i in range(cmd_plan.shape[0]):
@@ -502,6 +505,7 @@ def move_to_pose(
         ]
         obs, _, _, _, _ = env.step(actions)
         obs_saver.add(obs)
+    return True
 
 
 @configclass
@@ -559,15 +563,14 @@ obs_saver = ObsSaver(
 
 grasp_finder = GraspPoseFinder()
 
-step = 0
+# Warm up the environment by taking some dummy actions with default joint positions
+dummy_action = [{"dof_pos_target": robot.default_joint_positions} for _ in range(scenario.num_envs)]
+for _ in range(120):
+    obs, _, _, _, _ = env.step(dummy_action)
+obs_saver.add(obs)
+
 for step in range(1):
     log.debug(f"Step {step}")
-
-    # Warm up the environment by taking some dummy actions with default joint positions
-    dummy_action = [{"dof_pos_target": robot.default_joint_positions} for _ in range(scenario.num_envs)]
-    for _ in range(120):
-        obs, _, _, _, _ = env.step(dummy_action)
-    obs_saver.add(obs)
 
     # Get point cloud from observation
     pcd, depth, cam_intr_mat, cam_extr_mat = get_point_cloud_from_obs(obs)
@@ -651,13 +654,10 @@ for step in range(1):
     log.info(f"Original GSNet grasp rotation:\n{selected_gg.rotation_matrix}")
 
     position = selected_gg.translation.copy()
+
     # robot translation
-
     position[2] = -position[2]
-    position[1] = -position[1]
-
     position[0] = robot_offset - position[0]
-    position[1] = -position[1]
 
     # Add robot position offset since robot is now at (robot_offset, 0, 0)
     log.info(f"After coordinate flip + robot offset - position: {position}")
@@ -708,47 +708,27 @@ for step in range(1):
     quat = R.from_matrix(rotation).as_quat()
     quat *= np.array([1.0, -1.0, -1.0, 1.0])
 
-    ee_pos_target = torch.zeros((args.num_envs, 3), device="cuda:0")
-    ee_quat_target = torch.zeros((args.num_envs, 4), device="cuda:0")
-
     # Debug: Print final robot target pose
     log.info(f"Final robot target position: {position}")
     log.info(f"Final robot target quaternion: {quat}")
 
-    # position[2] += 0.1
-    ee_pos_target[0] = torch.tensor(position, device="cuda:0")
-    ee_quat_target[0] = torch.tensor(quat, device="cuda:0")
+    # convert ee pose to tcp pose
+    position, quat = ee_pose_from_tcp_pose(
+        robot,
+        tcp_pos=torch.tensor(position, dtype=torch.float32),
+        tcp_quat=torch.tensor(quat, dtype=torch.float32),
+    )
+    ee_pos_target = position.to("cuda:0").repeat(args.num_envs, 1)
+    ee_quat_target = quat.to("cuda:0").repeat(args.num_envs, 1)
 
-    pre_grasp_pos = ee_pos_target.clone()
     grasp_pos = ee_pos_target.clone()
     lift_pos = ee_pos_target.clone()
-    # breakpoint()
-    gripper_out = gripper_out.to("cuda:0")
 
-    # grasp_pos[:] -= gripper_out * 0.02
-    # grasp_pos[:, 2] += 0.01
-    # lift_pos[:] -= gripper_out * 0.02
-    log.info(f"original pre_grasp_pos: {pre_grasp_pos}")
-    # pre_grasp_pos[:, :2] -= gripper_out[:2] * 0.1
-
-    # pre_grasp_pos[:, :2] -= gripper_out[:2] * 0.075
-    pre_grasp_pos[:] -= gripper_out * 0.07
-    # grasp_pos[:, :2] -= gripper_out[:2] * 0.07
-    # lift_pos[:, :2] -= gripper_out[:2] * 0.0
-    grasp_pos[:] -= gripper_out * 0.07
-    lift_pos[:] -= gripper_out * 0.07
-
-    # TODO: set hyperparameter for heuristic grasp posing
-    pre_grasp_pos[:, 2] += 0.20
     lift_pos[:, 2] += 0.2
-    # grasp_pos[:, 2] += 0.1
-    log.info(f"gripper_out: {gripper_out}")
-    log.info(f"pre_grasp_pos: {pre_grasp_pos}")
     log.info(f"grasp_pos: {grasp_pos}")
 
-    # TODO: line 965-971
     gripper_pose(obs_saver, env, open_gripper=True, step=20)
-    move_to_pose(obs_saver, env, motion_gen, plan_config, pre_grasp_pos, ee_quat_target, steps=50)
+    # move_to_pose(obs_saver, env, motion_gen, plan_config, pre_grasp_pos, ee_quat_target, steps=50)
     move_to_pose(obs_saver, env, motion_gen, plan_config, grasp_pos, ee_quat_target, steps=50)
     gripper_pose(obs_saver, env, open_gripper=False, step=40)
     move_to_pose(obs_saver, env, motion_gen, plan_config, lift_pos, ee_quat_target, steps=50)
