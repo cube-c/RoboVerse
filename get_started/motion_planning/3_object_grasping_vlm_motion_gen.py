@@ -456,7 +456,7 @@ def gripper_pose(
     ee_n_dof = len(robot.gripper_open_q)
 
     log.info(f"Current robot joint state: {joint_pos}")
-    joint_pos[:, -ee_n_dof:] = 0.04 if open_gripper else 0.0
+    joint_pos[:, -ee_n_dof:] = torch.tensor(robot.gripper_open_q if open_gripper else robot.gripper_close_q)
 
     actions = [
         {"dof_pos_target": dict(zip(robot.actuators.keys(), joint_pos[i_env].tolist()))}
@@ -475,12 +475,13 @@ def move_to_pose(
     plan_config: MotionGenPlanConfig,
     ee_pos_target: torch.Tensor,
     ee_quat_target: torch.Tensor,
-    steps=20,
+    open_gripper: bool = False,
 ):
     """Move the robot to the target pose."""
     robot = env.handler.robots[0]
     joint_pos = env.handler.env.scene.articulations[robot.name].data.joint_pos.cuda()
     curobo_n_dof = len(motion_gen.kinematics.joint_names)
+    ee_n_dof = len(robot.gripper_open_q)
 
     ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
     log.info(f"Joint position : {joint_pos}")
@@ -499,6 +500,7 @@ def move_to_pose(
     cmd_plan = result.get_interpolated_plan().position
     for i in range(cmd_plan.shape[0]):
         joint_pos[:, :curobo_n_dof] = cmd_plan[i : i + 1, :]
+        joint_pos[:, -ee_n_dof:] = torch.tensor(robot.gripper_open_q if open_gripper else robot.gripper_close_q)
         actions = [
             {"dof_pos_target": dict(zip(robot.actuators.keys(), joint_pos[i_env]))}
             for i_env in range(scenario.num_envs)
@@ -729,9 +731,9 @@ for step in range(1):
 
     gripper_pose(obs_saver, env, open_gripper=True, step=20)
     # move_to_pose(obs_saver, env, motion_gen, plan_config, pre_grasp_pos, ee_quat_target, steps=50)
-    move_to_pose(obs_saver, env, motion_gen, plan_config, grasp_pos, ee_quat_target, steps=50)
+    move_to_pose(obs_saver, env, motion_gen, plan_config, grasp_pos, ee_quat_target, open_gripper=True)
     gripper_pose(obs_saver, env, open_gripper=False, step=40)
-    move_to_pose(obs_saver, env, motion_gen, plan_config, lift_pos, ee_quat_target, steps=50)
+    move_to_pose(obs_saver, env, motion_gen, plan_config, lift_pos, ee_quat_target, open_gripper=False)
 
     step += 1
 
