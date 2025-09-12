@@ -331,33 +331,10 @@ def get_point_cloud_from_obs(obs, save_pcd=False):
     return pcd_merged, depth[0], intr[0], extr[0]
 
 
-def find_closest_grasp(target_point, grasp_group):
-    """
-    Find the closest grasp candidate to the target 3D point.
-
-    Args:
-        target_point: Single 3D point (x, y, z)
-        grasp_group: GraspGroup object containing grasp candidates
-
-    Returns:
-        Index of the closest grasp candidate
-    """
-    if len(grasp_group) == 0:
-        return None
-
-    min_distance = float("inf")
-    closest_grasp_idx = 0
-
-    for i, grasp in enumerate(grasp_group):
-        grasp_position = grasp.translation
-
-        # Calculate distance to target point
-        distance = np.linalg.norm(grasp_position - target_point)
-        if distance < min_distance:
-            min_distance = distance
-            closest_grasp_idx = i
-
-    return closest_grasp_idx
+def sorted_grasp_by_distance(target_point, grasp_group):
+    dists = [np.linalg.norm(g.translation - target_point) for g in grasp_group]
+    sorted_indices = np.argsort(dists)
+    return grasp_group[sorted_indices]
 
 
 def get_3d_point_from_pixel(pixel_point, depth, cam_intr_mat, cam_extr_mat):
@@ -404,16 +381,6 @@ def get_3d_point_from_pixel(pixel_point, depth, cam_intr_mat, cam_extr_mat):
     xyz = point_world[:3]
     log.info(f"xyz: {xyz}")
     return xyz
-
-
-def find_closest_point_in_pcd(pcd, query_point):
-    """
-    Find the closest point in the Open3D point cloud to the given 3D point.
-    """
-    pcd_tree = o3d.geometry.KDTreeFlann(pcd)
-    [_, idx, _] = pcd_tree.search_knn_vector_3d(query_point, 1)
-    nearest_point = np.asarray(pcd.points)[idx[0]]
-    return nearest_point
 
 
 def filter_out_robot_from_pcd(pcd: o3d.geometry.PointCloud) -> o3d.geometry.PointCloud:
@@ -579,11 +546,7 @@ for step in range(1):
     pcd = filter_out_robot_from_pcd(pcd)
     motion_gen, plan_config = get_curobo_models_with_pcd(pcd, robot)
 
-    # remove file: /home/lukesong_google_com/RoboVerse/get_started/output/motion_planning/3_object_grasping_vlm/gsnet_visualization.png
-    # if os.path.exists("get_started/output/motion_planning/3_object_grasping_vlm/gsnet_visualization_new.png"):
-    #   os.remove("get_started/output/motion_planning/3_object_grasping_vlm/gsnet_visualization_new.png")
     gg = grasp_finder.find(pcd)
-
     grasp_finder.visualize(pcd, gg, image_only=True, save_dir="3_object_grasping_vlm", filename=f"{task_name}")
     grasp_finder.visualize(
         pcd, gg[:1], image_only=True, save_dir="3_object_grasping_vlm", filename=f"gsnet_top_one_{task_name}"
@@ -616,7 +579,6 @@ for step in range(1):
     # get 3d point of pixel (`point`) in the point cloud
     if len(point) > 0:
         point_3d = [get_3d_point_from_pixel(point[0], depth, cam_intr_mat, cam_extr_mat)]
-        # point_3d = [find_closest_point_in_pcd(pcd, point_3d[0])]
         log.info(f"3d point of pixel: {point_3d}")
         # convert
         point_3d[0][1] = -point_3d[0][1]
@@ -627,31 +589,21 @@ for step in range(1):
         point_3d = []
 
     # find the closest grasp candidate to the 3d point
-    # point_3d = [] # debug
-    if len(point_3d) > 0:
-        closest_grasp = find_closest_grasp(point_3d[0], gg)
-        log.info(f"Closest grasp candidate: {closest_grasp}")
-    else:
-        log.warning("No points detected by Qwen2.5-VL")
-        closest_grasp = None
-    # Select grasp based on VLM detection or use best score
-    if len(point_3d) > 0 and closest_grasp is not None:
-        selected_gg = gg[closest_grasp]
-        log.info(f"Selected grasp based on VLM detection: grasp #{closest_grasp}")
+    if point_3d:
+        gg = sorted_grasp_by_distance(point_3d[0], gg)
+        log.info(f"Closest grasp candidate(top 8): {gg[:8]}")
         grasp_finder.visualize(
             pcd,
-            gg[closest_grasp : closest_grasp + 1],
+            gg[0:1],
             image_only=True,
             save_dir="3_object_grasping_vlm",
             filename=f"qwen2.5vl_top_one_{task_name}_{object_name}",
         )
-
     else:
-        selected_gg = gg[0]  # Use best scoring grasp
-        log.info("Using best scoring grasp (no VLM detection)")
+        log.warning("No points detected by Qwen2.5-VL")
 
     # Debug: Print original grasp pose from GSNet
-    # selected_gg = gg[0]
+    selected_gg = gg[0]
     log.info(f"Original GSNet grasp position: {selected_gg.translation}")
     log.info(f"Original GSNet grasp rotation:\n{selected_gg.rotation_matrix}")
 
@@ -673,22 +625,15 @@ for step in range(1):
     log.info(f"After coordinate transformation - rotation:\n{R_world}")
 
     gripper_out = torch.tensor(R_world[:, 0])
+    gripper_out = gripper_out / np.linalg.norm(gripper_out)
 
     gripper_short = torch.tensor(R_world[:, 2])
-    gripper_out = gripper_out / np.linalg.norm(gripper_out)
     gripper_short = gripper_short / np.linalg.norm(gripper_short)
 
-    # 计算 y = z × x
-    gripper_long = np.cross(gripper_short, gripper_out)
-    gripper_long = gripper_long / np.linalg.norm(gripper_long)
-
-    # 重新计算 z，使得 x、y 完全正交（防止数值误差）
     gripper_long = np.cross(gripper_out, gripper_short)
     gripper_long = gripper_long / np.linalg.norm(gripper_long)
     gripper_long = torch.tensor(gripper_long)
-    # rotation = np.dot(rotation, delta_m)
 
-    # breakpoint()
     rotation_transform_for_franka = torch.tensor(
         [
             [0.0, 0.0, 1.0],
@@ -696,7 +641,6 @@ for step in range(1):
             [1.0, 0.0, 0.0],
         ],
     )
-    # import pdb; pdb.set_trace()
     rotation_target = torch.stack(
         [
             gripper_out + 1e-4,

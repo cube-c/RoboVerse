@@ -63,16 +63,12 @@ def get_curobo_models(robot_cfg: BaseRobotCfg, no_gnd=False):
     return kin_model, do_fk, ik_solver
 
 
-# Editing code based on https://github.com/NVlabs/curobo/blob/ebb71702f3f70e767f40fd8e050674af0288abe8/tests/ik_test.py#L61
-# I'm not sure yet...
-# Q. do we have to find out collsion-free ik for "each" grasp pose?
-# If a grasp pose is impossible to be a collision-free, then we might move on to the next possible pose
 def get_curobo_models_with_pcd(pcd: o3d.geometry.PointCloud, robot_cfg: BaseRobotCfg):
     """Initializes and returns the curobo kinematic model, forward kinematics function, and inverse kinematics solver for a given robot configuration.
 
     Args:
+        pcd (o3d.geometry.PointCloud): The point cloud representing the environment for collision checking.
         robot_cfg (BaseRobotCfg): The configuration object for the robot.
-        no_gnd (bool, optional): If True, the ground plane is not included for curobo collision checking. Defaults to False.
 
     Returns:
         tuple: A tuple containing:
