@@ -180,8 +180,10 @@ class GraspPoseFinder:
 
         # point_mask = np.logical_and(points[:,2] <= 0.1 , points[:,0] >= 0.1)
         points_masked = points[point_mask]
-        points_masked[:, 2] = -points_masked[:, 2]
-        points_masked[:, 1] = -points_masked[:, 1]
+
+        # is it necessary??
+        # points_masked[:, 2] = -points_masked[:, 2]
+        # points_masked[:, 1] = -points_masked[:, 1]
         colors_masked = colors[point_mask]
         log.info(
             f"New Point cloud bounds: X[{points_masked[:, 0].min():.3f}, {points_masked[:, 0].max():.3f}], "
@@ -580,10 +582,10 @@ for step in range(1):
     if len(point) > 0:
         point_3d = [get_3d_point_from_pixel(point[0], depth, cam_intr_mat, cam_extr_mat)]
         log.info(f"3d point of pixel: {point_3d}")
-        # convert
-        point_3d[0][1] = -point_3d[0][1]
-        point_3d[0][2] = -point_3d[0][2]
-        log.info(f"converted 3d point of pixel: {point_3d}")
+        # # convert
+        # point_3d[0][1] = -point_3d[0][1]
+        # point_3d[0][2] = -point_3d[0][2]
+        # log.info(f"converted 3d point of pixel: {point_3d}")
     else:
         log.warning("No points detected by Qwen2.5-VL")
         point_3d = []
@@ -610,7 +612,8 @@ for step in range(1):
     position = selected_gg.translation.copy()
 
     # robot translation
-    position[2] = -position[2]
+    # position[2] = -position[2]
+    position[1] = -position[1]
     position[0] = robot_offset - position[0]
 
     # Add robot position offset since robot is now at (robot_offset, 0, 0)

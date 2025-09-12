@@ -78,7 +78,6 @@ def get_curobo_models_with_pcd(pcd: o3d.geometry.PointCloud, robot_cfg: BaseRobo
     """
     tensor_args = TensorDeviceType()
     robot_cfg = load_yaml(join_path(get_robot_path(), robot_cfg.curobo_ref_cfg_name))["robot_cfg"]
-    log.info(f"Loaded curobo robot config from {robot_cfg}")
     # robot_cfg["kinematics"]["collision_spheres"] = "spheres/franka_collision_mesh.yml"
     world_cfg = WorldConfig(
         cuboid=[
