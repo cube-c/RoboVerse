@@ -477,9 +477,12 @@ class MotionController:
         if succ_index is None:
             log.debug("No successful motion plan found.")
             log.debug(f"Result: {result}")
-            return False
+            return None
 
-        cmd_plan = result.get_paths()[succ_index].position
+        if len(result.success) == 1:
+            cmd_plan = result.get_interpolated_plan().position
+        else:
+            cmd_plan = result.get_paths()[succ_index].position
         for i in range(cmd_plan.shape[0]):
             joint_pos[:, : self.curobo_n_dof] = cmd_plan[i : i + 1, :]
             joint_pos[:, -self.ee_n_dof :] = torch.tensor(
@@ -491,7 +494,7 @@ class MotionController:
             ]
             obs, _, _, _, _ = self.env.step(actions)
             self.obs_saver.add(obs)
-        return True
+        return succ_index
 
 
 @configclass
@@ -656,8 +659,11 @@ for step in range(1):
 
     motion_controller = MotionController(env, motion_gen, plan_config, obs_saver)
     motion_controller.control_gripper(open_gripper=True, step=20)
-    motion_controller.move_to_pose(grasp_pos, ee_quat_target, open_gripper=True)
+    succ_index = motion_controller.move_to_pose(grasp_pos, ee_quat_target, open_gripper=True)
     motion_controller.control_gripper(open_gripper=False, step=40)
-    motion_controller.move_to_pose(lift_pos, ee_quat_target, open_gripper=False)
+    if succ_index is not None:
+        motion_controller.move_to_pose(
+            lift_pos[succ_index : succ_index + 1], ee_quat_target[succ_index : succ_index + 1], open_gripper=False
+        )
 
 obs_saver.save()

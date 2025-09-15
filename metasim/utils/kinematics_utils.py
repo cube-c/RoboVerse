@@ -98,8 +98,7 @@ def get_curobo_models_with_pcd(pcd: o3d.geometry.PointCloud, robot_cfg: BaseRobo
         tensor_args,
         self_collision_check=True,
         self_collision_opt=True,
-        use_cuda_graph=True,
-        # TODO: add logging args
+        use_cuda_graph=False,  # True
     )
     motion_gen = MotionGen(motion_gen_config)
     motion_gen.warmup()
@@ -111,7 +110,7 @@ def get_curobo_models_with_pcd(pcd: o3d.geometry.PointCloud, robot_cfg: BaseRobo
         enable_finetune_trajopt=True,
         partial_ik_opt=False,
         parallel_finetune=True,
-        time_dilation_factor=0.75,  # for debugging purpose?
+        # time_dilation_factor=0.75,
     )
 
     return motion_gen, plan_config
