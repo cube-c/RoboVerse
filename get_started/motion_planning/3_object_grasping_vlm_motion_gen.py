@@ -160,6 +160,10 @@ class GraspPoseFinder:
     def __init__(self):
         self.gsnet = GSNet()
 
+        # for axis conversion between GSNet and isaaclab
+        # TODO: check if this is necessary
+        self.transform_matrix = np.diag([1, -1, -1])
+
     def find(self, pcd: o3d.geometry.PointCloud):
         points = np.array(pcd.points)
         colors = np.array(pcd.colors)
@@ -180,10 +184,6 @@ class GraspPoseFinder:
 
         # point_mask = np.logical_and(points[:,2] <= 0.1 , points[:,0] >= 0.1)
         points_masked = points[point_mask]
-
-        # is it necessary??
-        # points_masked[:, 2] = -points_masked[:, 2]
-        # points_masked[:, 1] = -points_masked[:, 1]
         colors_masked = colors[point_mask]
         log.info(
             f"New Point cloud bounds: X[{points_masked[:, 0].min():.3f}, {points_masked[:, 0].max():.3f}], "
@@ -193,7 +193,9 @@ class GraspPoseFinder:
         pcd.points = o3d.utility.Vector3dVector(points_masked)
         pcd.colors = o3d.utility.Vector3dVector(colors_masked)
 
-        grasps = self.gsnet.inference(np.array(pcd.points))
+        grasps = self.gsnet.inference(np.array(pcd.points) @ self.transform_matrix)
+        grasps.translations = grasps.translations @ self.transform_matrix.T
+        grasps.rotation_matrices = self.transform_matrix @ grasps.rotation_matrices @ self.transform_matrix.T
 
         # log best grasp candidate
         log.info(f"Total grasp candidates: {len(grasps)}")
@@ -204,7 +206,13 @@ class GraspPoseFinder:
 
     def visualize(self, pcd: o3d.geometry.PointCloud, grasps, image_only=False, save_dir="", filename=""):
         pcd_clone = copy.deepcopy(pcd)
-        self.gsnet.visualize(pcd_clone, grasps, image_only=image_only, save_dir=save_dir, filename=filename)
+        grasps_clone = copy.deepcopy(grasps)
+        pcd_clone.points = o3d.utility.Vector3dVector(np.asarray(pcd.points) @ self.transform_matrix)
+        grasps_clone.translations = grasps_clone.translations @ self.transform_matrix.T
+        grasps_clone.rotation_matrices = (
+            self.transform_matrix @ grasps_clone.rotation_matrices @ self.transform_matrix.T
+        )
+        self.gsnet.visualize(pcd_clone, grasps_clone, image_only=image_only, save_dir=save_dir, filename=filename)
 
 
 def get_environment(scenario, sim="isaaclab", robot_offset=1.15):
@@ -413,70 +421,73 @@ def filter_out_robot_from_pcd(pcd: o3d.geometry.PointCloud) -> o3d.geometry.Poin
     return pcd_filtered
 
 
-def gripper_pose(
-    obs_saver: ObsSaver,
-    env: IdentityEnvWrapper,
-    open_gripper=False,
-    step=20,
-):
-    """Get the gripper pose."""
-    robot = env.handler.robots[0]
-    joint_pos = env.handler.env.scene.articulations[robot.name].data.joint_pos.cuda()
-    ee_n_dof = len(robot.gripper_open_q)
+class MotionController:
+    def __init__(
+        self,
+        env: IdentityEnvWrapper,
+        motion_gen: MotionGen,
+        plan_config: MotionGenPlanConfig,
+        obs_saver: ObsSaver,
+    ):
+        self.env = env
+        self.motion_gen = motion_gen
+        self.plan_config = plan_config
+        self.obs_saver = obs_saver
 
-    log.info(f"Current robot joint state: {joint_pos}")
-    joint_pos[:, -ee_n_dof:] = torch.tensor(robot.gripper_open_q if open_gripper else robot.gripper_close_q)
+        self.robot = env.handler.robots[0]
+        self.ee_n_dof = len(self.robot.gripper_open_q)
+        self.curobo_n_dof = len(motion_gen.kinematics.joint_names)
 
-    actions = [
-        {"dof_pos_target": dict(zip(robot.actuators.keys(), joint_pos[i_env].tolist()))}
-        for i_env in range(scenario.num_envs)
-    ]
-    log.info(f"Gripper actions: {actions}")
-    for _ in range(step):
-        obs, _, _, _, _ = env.step(actions)
-        obs_saver.add(obs)
+    def get_joint_pos(self):
+        """Get the current joint position."""
+        joint_pos = self.env.handler.env.scene.articulations[robot.name].data.joint_pos.cuda()
+        return joint_pos
 
-
-def move_to_pose(
-    obs_saver: ObsSaver,
-    env: IdentityEnvWrapper,
-    motion_gen: MotionGen,
-    plan_config: MotionGenPlanConfig,
-    ee_pos_target: torch.Tensor,
-    ee_quat_target: torch.Tensor,
-    open_gripper: bool = False,
-):
-    """Move the robot to the target pose."""
-    robot = env.handler.robots[0]
-    joint_pos = env.handler.env.scene.articulations[robot.name].data.joint_pos.cuda()
-    curobo_n_dof = len(motion_gen.kinematics.joint_names)
-    ee_n_dof = len(robot.gripper_open_q)
-
-    ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
-    log.info(f"Joint position : {joint_pos}")
-    log.info(f"Joint names: {motion_gen.kinematics.joint_names}")
-    cu_js = JointState.from_position(position=joint_pos, joint_names=list(robot.actuators.keys()))
-    cu_js = JointState.get_ordered_joint_state(cu_js, motion_gen.kinematics.joint_names)
-    log.info(f"Current robot joint state: {cu_js}")
-    result = motion_gen.plan_single(cu_js, ik_goal, plan_config)
-
-    succ = result.success.item()
-    if not succ:
-        log.debug("Failed to find feasible solution")
-        log.debug(f"Reason: {result}")
-        return False
-
-    cmd_plan = result.get_interpolated_plan().position
-    for i in range(cmd_plan.shape[0]):
-        joint_pos[:, :curobo_n_dof] = cmd_plan[i : i + 1, :]
-        joint_pos[:, -ee_n_dof:] = torch.tensor(robot.gripper_open_q if open_gripper else robot.gripper_close_q)
+    def control_gripper(self, open_gripper: bool, step: int = 20):
+        joint_pos = self.get_joint_pos()
+        joint_pos[:, -self.ee_n_dof :] = torch.tensor(
+            self.robot.gripper_open_q if open_gripper else self.robot.gripper_close_q
+        )
         actions = [
-            {"dof_pos_target": dict(zip(robot.actuators.keys(), joint_pos[i_env]))}
+            {"dof_pos_target": dict(zip(robot.actuators.keys(), joint_pos[i_env].tolist()))}
             for i_env in range(scenario.num_envs)
         ]
-        obs, _, _, _, _ = env.step(actions)
-        obs_saver.add(obs)
-    return True
+        log.info(f"Gripper actions: {actions}")
+        for _ in range(step):
+            obs, _, _, _, _ = env.step(actions)
+            obs_saver.add(obs)
+
+    def move_to_pose(self, ee_pos_target: torch.Tensor, ee_quat_target: torch.Tensor, open_gripper: bool = False):
+        """Move the robot to the target pose."""
+        joint_pos = self.get_joint_pos()
+
+        ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
+        log.info(f"Joint position : {joint_pos}")
+        log.info(f"Joint names: {self.motion_gen.kinematics.joint_names}")
+        cu_js = JointState.from_position(position=joint_pos, joint_names=list(self.robot.actuators.keys()))
+        cu_js = JointState.get_ordered_joint_state(cu_js, self.motion_gen.kinematics.joint_names)
+        log.info(f"Current robot joint state: {cu_js}")
+        result = self.motion_gen.plan_single(cu_js, ik_goal, self.plan_config)
+
+        succ = result.success.item()
+        if not succ:
+            log.debug("Failed to find feasible solution")
+            log.debug(f"Reason: {result}")
+            return False
+
+        cmd_plan = result.get_interpolated_plan().position
+        for i in range(cmd_plan.shape[0]):
+            joint_pos[:, : self.curobo_n_dof] = cmd_plan[i : i + 1, :]
+            joint_pos[:, -self.ee_n_dof :] = torch.tensor(
+                self.robot.gripper_open_q if open_gripper else self.robot.gripper_close_q
+            )
+            actions = [
+                {"dof_pos_target": dict(zip(self.robot.actuators.keys(), joint_pos[i_env].tolist()))}
+                for i_env in range(scenario.num_envs)
+            ]
+            obs, _, _, _, _ = self.env.step(actions)
+            self.obs_saver.add(obs)
+        return True
 
 
 @configclass
@@ -582,10 +593,6 @@ for step in range(1):
     if len(point) > 0:
         point_3d = [get_3d_point_from_pixel(point[0], depth, cam_intr_mat, cam_extr_mat)]
         log.info(f"3d point of pixel: {point_3d}")
-        # # convert
-        # point_3d[0][1] = -point_3d[0][1]
-        # point_3d[0][2] = -point_3d[0][2]
-        # log.info(f"converted 3d point of pixel: {point_3d}")
     else:
         log.warning("No points detected by Qwen2.5-VL")
         point_3d = []
@@ -604,58 +611,24 @@ for step in range(1):
     else:
         log.warning("No points detected by Qwen2.5-VL")
 
-    # Debug: Print original grasp pose from GSNet
+    # Select Top N batch grasp candidates
+    # N = 8
     selected_gg = gg[0]
     log.info(f"Original GSNet grasp position: {selected_gg.translation}")
     log.info(f"Original GSNet grasp rotation:\n{selected_gg.rotation_matrix}")
 
     position = selected_gg.translation.copy()
 
-    # robot translation
-    # position[2] = -position[2]
-    position[1] = -position[1]
-    position[0] = robot_offset - position[0]
+    # robot pose : 180 degree rotation around z axis
+    R_180 = np.diag([-1.0, -1.0, 1.0])
+    position = np.array([robot_offset, 0.0, 0.0]) + R_180 @ position
+    rotation = R_180 @ selected_gg.rotation_matrix @ R_180.T
 
-    # Add robot position offset since robot is now at (robot_offset, 0, 0)
-    log.info(f"After coordinate flip + robot offset - position: {position}")
-
-    rotation_ori = selected_gg.rotation_matrix
-    # Since robot is rotated 180° around Z-axis, we need to account for this
-    # Robot quaternion (0,0,0,1) means 180° rotation around Z
-    # R_180 = np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]])
-    R_180 = np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]])
-    R_world = R_180 @ rotation_ori @ R_180.T
-    log.info(f"After coordinate transformation - rotation:\n{R_world}")
-
-    gripper_out = torch.tensor(R_world[:, 0])
-    gripper_out = gripper_out / np.linalg.norm(gripper_out)
-
-    gripper_short = torch.tensor(R_world[:, 2])
-    gripper_short = gripper_short / np.linalg.norm(gripper_short)
-
-    gripper_long = np.cross(gripper_out, gripper_short)
-    gripper_long = gripper_long / np.linalg.norm(gripper_long)
-    gripper_long = torch.tensor(gripper_long)
-
-    rotation_transform_for_franka = torch.tensor(
-        [
-            [0.0, 0.0, 1.0],
-            [0.0, 1.0, 0.0],
-            [1.0, 0.0, 0.0],
-        ],
-    )
-    rotation_target = torch.stack(
-        [
-            gripper_out + 1e-4,
-            gripper_long + 1e-4,
-            gripper_short + 1e-4,
-        ],
-        dim=0,
-    ).float()
-    rotation = rotation_target @ rotation_transform_for_franka
+    franka_L = np.diag([1, -1, 1])
+    franka_R = np.array([[0, 0, -1], [0, 1, 0], [-1, 0, 0]])
+    rotation = franka_L @ rotation.T @ franka_R
 
     quat = R.from_matrix(rotation).as_quat()
-    quat *= np.array([1.0, -1.0, -1.0, 1.0])
 
     # Debug: Print final robot target pose
     log.info(f"Final robot target position: {position}")
@@ -676,12 +649,10 @@ for step in range(1):
     lift_pos[:, 2] += 0.2
     log.info(f"grasp_pos: {grasp_pos}")
 
-    gripper_pose(obs_saver, env, open_gripper=True, step=20)
-    # move_to_pose(obs_saver, env, motion_gen, plan_config, pre_grasp_pos, ee_quat_target, steps=50)
-    move_to_pose(obs_saver, env, motion_gen, plan_config, grasp_pos, ee_quat_target, open_gripper=True)
-    gripper_pose(obs_saver, env, open_gripper=False, step=40)
-    move_to_pose(obs_saver, env, motion_gen, plan_config, lift_pos, ee_quat_target, open_gripper=False)
-
-    step += 1
+    motion_controller = MotionController(env, motion_gen, plan_config, obs_saver)
+    motion_controller.control_gripper(open_gripper=True, step=20)
+    motion_controller.move_to_pose(grasp_pos, ee_quat_target, open_gripper=True)
+    motion_controller.control_gripper(open_gripper=False, step=40)
+    motion_controller.move_to_pose(lift_pos, ee_quat_target, open_gripper=False)
 
 obs_saver.save()
