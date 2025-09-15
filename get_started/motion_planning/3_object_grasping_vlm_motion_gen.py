@@ -462,20 +462,24 @@ class MotionController:
         joint_pos = self.get_joint_pos()
 
         ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
-        log.info(f"Joint position : {joint_pos}")
-        log.info(f"Joint names: {self.motion_gen.kinematics.joint_names}")
-        cu_js = JointState.from_position(position=joint_pos, joint_names=list(self.robot.actuators.keys()))
+        log.info(f"Target EE pose: {ik_goal}")
+        # log.info(f"Joint names: {self.motion_gen.kinematics.joint_names}")
+        cu_js = JointState.from_position(
+            position=joint_pos.repeat(ik_goal.batch, 1, 1), joint_names=list(self.robot.actuators.keys())
+        )
         cu_js = JointState.get_ordered_joint_state(cu_js, self.motion_gen.kinematics.joint_names)
         log.info(f"Current robot joint state: {cu_js}")
-        result = self.motion_gen.plan_single(cu_js, ik_goal, self.plan_config)
+        result = self.motion_gen.plan_batch(cu_js, ik_goal, self.plan_config)
+        log.debug(f"Motion planning result:{result.success}")
 
-        succ = result.success.item()
-        if not succ:
-            log.debug("Failed to find feasible solution")
-            log.debug(f"Reason: {result}")
+        # choose the first successful result
+        succ_index = next((i for i, x in enumerate(result.success.tolist()) if x), None)
+        if succ_index is None:
+            log.debug("No successful motion plan found.")
+            log.debug(f"Result: {result}")
             return False
 
-        cmd_plan = result.get_interpolated_plan().position
+        cmd_plan = result.get_paths()[succ_index].position
         for i in range(cmd_plan.shape[0]):
             joint_pos[:, : self.curobo_n_dof] = cmd_plan[i : i + 1, :]
             joint_pos[:, -self.ee_n_dof :] = torch.tensor(
@@ -551,6 +555,9 @@ for _ in range(120):
     obs, _, _, _, _ = env.step(dummy_action)
 obs_saver.add(obs)
 
+# How many grasp candidates to consider
+N = 8
+
 for step in range(1):
     log.debug(f"Step {step}")
 
@@ -603,7 +610,7 @@ for step in range(1):
         log.info(f"Closest grasp candidate(top 8): {gg[:8]}")
         grasp_finder.visualize(
             pcd,
-            gg[0:1],
+            gg[0:N],
             image_only=True,
             save_dir="3_object_grasping_vlm",
             filename=f"qwen2.5vl_top_one_{task_name}_{object_name}",
@@ -612,41 +619,39 @@ for step in range(1):
         log.warning("No points detected by Qwen2.5-VL")
 
     # Select Top N batch grasp candidates
-    # N = 8
-    selected_gg = gg[0]
-    log.info(f"Original GSNet grasp position: {selected_gg.translation}")
-    log.info(f"Original GSNet grasp rotation:\n{selected_gg.rotation_matrix}")
+    selected_gg = gg[:N]
 
-    position = selected_gg.translation.copy()
+    positions = selected_gg.translations.copy()
+    rotations = selected_gg.rotation_matrices.copy()
 
     # robot pose : 180 degree rotation around z axis
     R_180 = np.diag([-1.0, -1.0, 1.0])
-    position = np.array([robot_offset, 0.0, 0.0]) + R_180 @ position
-    rotation = R_180 @ selected_gg.rotation_matrix @ R_180.T
+    positions = np.array([[robot_offset, 0.0, 0.0]]) + positions @ R_180.T
+    rotations = R_180 @ rotations @ R_180.T
 
+    # franka transform
     franka_L = np.diag([1, -1, 1])
     franka_R = np.array([[0, 0, -1], [0, 1, 0], [-1, 0, 0]])
-    rotation = franka_L @ rotation.T @ franka_R
+    rotations = franka_L @ rotations.transpose(0, 2, 1) @ franka_R
 
-    quat = R.from_matrix(rotation).as_quat()
-
-    # Debug: Print final robot target pose
-    log.info(f"Final robot target position: {position}")
-    log.info(f"Final robot target quaternion: {quat}")
+    quats = R.from_matrix(rotations).as_quat()
 
     # convert ee pose to tcp pose
-    position, quat = ee_pose_from_tcp_pose(
+    positions, quats = ee_pose_from_tcp_pose(
         robot,
-        tcp_pos=torch.tensor(position, dtype=torch.float32),
-        tcp_quat=torch.tensor(quat, dtype=torch.float32),
+        tcp_pos=torch.tensor(positions, dtype=torch.float32),
+        tcp_quat=torch.tensor(quats, dtype=torch.float32),
     )
-    ee_pos_target = position.to("cuda:0").repeat(args.num_envs, 1)
-    ee_quat_target = quat.to("cuda:0").repeat(args.num_envs, 1)
+    log.info(f"Final robot target position: {positions[0]}")
+    log.info(f"Final robot target quaternion: {quats[0]}")
+
+    ee_pos_target = positions.to("cuda:0").unsqueeze(1)
+    ee_quat_target = quats.to("cuda:0").unsqueeze(1)
 
     grasp_pos = ee_pos_target.clone()
     lift_pos = ee_pos_target.clone()
 
-    lift_pos[:, 2] += 0.2
+    lift_pos[:, :, 2] += 0.2
     log.info(f"grasp_pos: {grasp_pos}")
 
     motion_controller = MotionController(env, motion_gen, plan_config, obs_saver)
