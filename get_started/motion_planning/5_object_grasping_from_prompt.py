@@ -29,37 +29,35 @@ from rich.logging import RichHandler
 rootutils.setup_root(__file__, pythonpath=True)
 log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 
+import json
+import re
+from typing import Any, List
+
 import open3d as o3d
 import rootutils
 from loguru import logger as log
+from PIL import Image
 from rich.logging import RichHandler
+from scipy.spatial.transform import Rotation as R
+from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
 from curobo.types.math import Pose
 from curobo.types.robot import JointState
 from curobo.types.state import JointState
 from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenPlanConfig
-from metasim.sim import IdentityEnvWrapper
-
-rootutils.setup_root(__file__, pythonpath=True)
-log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
-import json
-import re
-from typing import Any, List
-
-from PIL import Image
-from scipy.spatial.transform import Rotation as R
-from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
-
 from get_started.motion_planning.util_gsnet import GSNet
 from get_started.utils import ObsSaver, get_pcd_from_rgbd
 from metasim.cfg.scenario import ScenarioCfg
 from metasim.cfg.sensors import PinholeCameraCfg
 from metasim.constants import SimType
+from metasim.sim import IdentityEnvWrapper
 from metasim.utils import configclass
 from metasim.utils.camera_util import get_cam_params
 from metasim.utils.demo_util import get_traj
 from metasim.utils.kinematics_utils import ee_pose_from_tcp_pose, get_curobo_models_with_pcd
 from metasim.utils.setup_util import get_sim_env_class, get_task
+
+_debug = True
 
 
 class VLMPointExtractor:
@@ -702,6 +700,7 @@ img = Image.fromarray(obs.cameras["camera0"].rgb[0].cpu().numpy())
 seq = vlm_extractor.extract_sequence(img, prompt)
 assert isinstance(seq, list) and len(seq) > 0, "No valid action sequence found"
 
+# TODO: support multiple steps
 start_point = seq[0]["pick_up"]
 end_point = seq[0]["put_down"]
 
@@ -733,7 +732,7 @@ for step in range(1):
     )
     # Select Top N batch grasp candidates and convert to franka ee pose
     ee_pos_pickup, ee_quat_pickup = grasp_to_franka(robot, gg[:N], robot_offset=robot_offset)
-    tcp_pos_putdown = torch.tensor([[end_point_3d]]).clone()
+    tcp_pos_putdown = torch.tensor([[end_point_3d]])
 
     motion_controller = MotionController(env, motion_gen, plan_config, obs_saver)
     motion_controller.control_gripper(open_gripper=True, step=20)
