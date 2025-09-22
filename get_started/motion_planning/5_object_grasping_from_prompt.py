@@ -694,11 +694,15 @@ obs_saver.add(obs)
 N = 8
 
 # Qwen2.5-VL
-vlm_extractor = VLMPointExtractor()
-img = Image.fromarray(obs.cameras["camera0"].rgb[0].cpu().numpy())
+# Debug mode with fixed points
+if _debug:
+    seq = [{"pick_up": [248, 808], "put_down": [879, 704]}]
+else:
+    vlm_extractor = VLMPointExtractor()
+    img = Image.fromarray(obs.cameras["camera0"].rgb[0].cpu().numpy())
 
-seq = vlm_extractor.extract_sequence(img, prompt)
-assert isinstance(seq, list) and len(seq) > 0, "No valid action sequence found"
+    seq = vlm_extractor.extract_sequence(img, prompt)
+    assert isinstance(seq, list) and len(seq) > 0, "No valid action sequence found"
 
 # TODO: support multiple steps
 start_point = seq[0]["pick_up"]
