@@ -57,7 +57,7 @@ from metasim.utils.demo_util import get_traj
 from metasim.utils.kinematics_utils import ee_pose_from_tcp_pose, get_curobo_models_with_pcd
 from metasim.utils.setup_util import get_sim_env_class, get_task
 
-_debug = True
+_debug = False
 
 
 class VLMPointExtractor:
@@ -603,15 +603,19 @@ class MotionController:
         return succ_index, ee_pos_target[succ_index], ee_quat_target[succ_index]
 
 
-def grasp_to_franka(robot, grasps, robot_offset=1.15):
-    """Convert the grasp pose to franka end-effector pose."""
-    positions = grasps.translations.copy()
-    rotations = grasps.rotation_matrices.copy()
-
+def world_to_franka(robot, positions, rotations, robot_offset=1.15):
     # robot pose : 180 degree rotation around z axis
     R_180 = np.diag([-1.0, -1.0, 1.0])
     positions = np.array([[robot_offset, 0.0, 0.0]]) + positions @ R_180.T
     rotations = R_180 @ rotations @ R_180.T
+    return positions, rotations
+
+
+def grasp_to_franka(robot, grasps):
+    """Convert the grasp pose to franka end-effector pose."""
+    positions = grasps.translations.copy()
+    rotations = grasps.rotation_matrices.copy()
+    positions, rotations = world_to_franka(robot, positions, rotations)
 
     # franka transform
     franka_L = np.diag([1, -1, 1])
@@ -720,8 +724,6 @@ for step in range(1):
 
     start_point_3d = get_3d_point_from_pixel(start_point, depth, cam_intr_mat, cam_extr_mat)
     end_point_3d = get_3d_point_from_pixel(end_point, depth, cam_intr_mat, cam_extr_mat)
-    assert start_point_3d, "Failed to get 3D point from pixel"
-    assert end_point_3d, "Failed to get 3D point from pixel"
     log.info(f"3d point of pixel: {start_point_3d} / {end_point_3d}")
 
     # find the closest grasp candidate to the 3d point
@@ -735,8 +737,11 @@ for step in range(1):
         filename=f"qwen2.5vl_top_one_{task_name}",
     )
     # Select Top N batch grasp candidates and convert to franka ee pose
-    ee_pos_pickup, ee_quat_pickup = grasp_to_franka(robot, gg[:N], robot_offset=robot_offset)
-    tcp_pos_putdown = torch.tensor([[end_point_3d]])
+    ee_pos_pickup, ee_quat_pickup = grasp_to_franka(robot, gg[:N])
+
+    tcp_pos_putdown, _ = world_to_franka(robot, np.array([end_point_3d]), np.eye(3))
+    tcp_pos_putdown = torch.tensor(tcp_pos_putdown, dtype=torch.float32).unsqueeze(1).to("cuda:0")
+    tcp_pos_putdown[0, 0, 2] += 0.3  # lift up a bit
 
     motion_controller = MotionController(env, motion_gen, plan_config, obs_saver)
     motion_controller.control_gripper(open_gripper=True, step=20)
@@ -745,7 +750,7 @@ for step in range(1):
     motion_controller.control_gripper(open_gripper=False, step=40)
 
     # Move up
-    quat[:, 2] += 0.2
+    pos[:, 2] += 0.2
     _, pos, quat = motion_controller.move_to_pose(pos.unsqueeze(1), quat.unsqueeze(1), open_gripper=False)
 
     # Move to putdown position
