@@ -46,7 +46,7 @@ import json
 import re
 from typing import Any, List
 
-from PIL import Image, ImageDraw
+from PIL import Image
 from scipy.spatial.transform import Rotation as R
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
@@ -715,14 +715,14 @@ for step in range(1):
 
     gg = grasp_finder.find(pcd)
 
-    start_point_3d = [get_3d_point_from_pixel(start_point, depth, cam_intr_mat, cam_extr_mat)]
-    end_point_3d = [get_3d_point_from_pixel(end_point, depth, cam_intr_mat, cam_extr_mat)]
-    log.info(f"3d point of pixel: {start_point_3d} / {end_point_3d}")
+    start_point_3d = get_3d_point_from_pixel(start_point, depth, cam_intr_mat, cam_extr_mat)
+    end_point_3d = get_3d_point_from_pixel(end_point, depth, cam_intr_mat, cam_extr_mat)
     assert start_point_3d, "Failed to get 3D point from pixel"
     assert end_point_3d, "Failed to get 3D point from pixel"
+    log.info(f"3d point of pixel: {start_point_3d} / {end_point_3d}")
 
     # find the closest grasp candidate to the 3d point
-    gg = sorted_grasp_by_distance(start_point_3d[0], gg)
+    gg = sorted_grasp_by_distance(start_point_3d, gg)
     log.info(f"Closest grasp candidate(top 8): {gg[:8]}")
     grasp_finder.visualize(
         pcd,
@@ -732,11 +732,12 @@ for step in range(1):
         filename=f"qwen2.5vl_top_one_{task_name}",
     )
     # Select Top N batch grasp candidates and convert to franka ee pose
-    ee_pos_target, ee_quat_target = grasp_to_franka(robot, gg[:N], robot_offset=robot_offset)
+    ee_pos_pickup, ee_quat_pickup = grasp_to_franka(robot, gg[:N], robot_offset=robot_offset)
+    tcp_pos_putdown = torch.tensor([[end_point_3d]]).clone()
 
     motion_controller = MotionController(env, motion_gen, plan_config, obs_saver)
     motion_controller.control_gripper(open_gripper=True, step=20)
-    _, pos, quat = motion_controller.move_to_pose(ee_pos_target, ee_quat_target, open_gripper=True)
+    _, pos, quat = motion_controller.move_to_pose(ee_pos_pickup, ee_quat_pickup, open_gripper=True)
     assert pos is not None, "No successful motion plan found for grasping"
     motion_controller.control_gripper(open_gripper=False, step=40)
 
@@ -744,6 +745,10 @@ for step in range(1):
     quat[:, 2] += 0.2
     _, pos, quat = motion_controller.move_to_pose(pos.unsqueeze(1), quat.unsqueeze(1), open_gripper=False)
 
+    # Move to putdown position
+    ee_pos_putdown, ee_quat_putdown = ee_pose_from_tcp_pose(robot, tcp_pos=tcp_pos_putdown, tcp_quat=quat.unsqueeze(1))
+    motion_controller.move_to_pose(ee_pos_putdown, ee_quat_putdown, open_gripper=False)
+    motion_controller.control_gripper(open_gripper=True, step=40)
 
 
 obs_saver.save()
