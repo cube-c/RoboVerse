@@ -605,6 +605,35 @@ class MotionController:
         return succ_index, ee_pos_target[succ_index], ee_quat_target[succ_index]
 
 
+def grasp_to_franka(robot, grasps, robot_offset=1.15):
+    """Convert the grasp pose to franka end-effector pose."""
+    positions = grasps.translations.copy()
+    rotations = grasps.rotation_matrices.copy()
+
+    # robot pose : 180 degree rotation around z axis
+    R_180 = np.diag([-1.0, -1.0, 1.0])
+    positions = np.array([[robot_offset, 0.0, 0.0]]) + positions @ R_180.T
+    rotations = R_180 @ rotations @ R_180.T
+
+    # franka transform
+    franka_L = np.diag([1, -1, 1])
+    franka_R = np.array([[0, 0, -1], [0, 1, 0], [-1, 0, 0]])
+    rotations = franka_L @ rotations.transpose(0, 2, 1) @ franka_R
+
+    quats = R.from_matrix(rotations).as_quat()
+
+    # convert ee pose to tcp pose
+    positions, quats = ee_pose_from_tcp_pose(
+        robot,
+        tcp_pos=torch.tensor(positions, dtype=torch.float32),
+        tcp_quat=torch.tensor(quats, dtype=torch.float32),
+    )
+
+    ee_pos_target = positions.to("cuda:0").unsqueeze(1)
+    ee_quat_target = quats.to("cuda:0").unsqueeze(1)
+    return ee_pos_target, ee_quat_target
+
+
 @configclass
 class Args:
     """Arguments for the static scene."""
@@ -689,65 +718,32 @@ for step in range(1):
     start_point_3d = [get_3d_point_from_pixel(start_point, depth, cam_intr_mat, cam_extr_mat)]
     end_point_3d = [get_3d_point_from_pixel(end_point, depth, cam_intr_mat, cam_extr_mat)]
     log.info(f"3d point of pixel: {start_point_3d} / {end_point_3d}")
+    assert start_point_3d, "Failed to get 3D point from pixel"
+    assert end_point_3d, "Failed to get 3D point from pixel"
 
     # find the closest grasp candidate to the 3d point
-    if start_point_3d:
-        gg = sorted_grasp_by_distance(start_point_3d[0], gg)
-        log.info(f"Closest grasp candidate(top 8): {gg[:8]}")
-        grasp_finder.visualize(
-            pcd,
-            gg[0:N],
-            image_only=True,
-            save_dir="3_object_grasping_vlm",
-            filename=f"qwen2.5vl_top_one_{task_name}",
-        )
-    else:
-        log.warning("No points detected by Qwen2.5-VL")
-
-    # Select Top N batch grasp candidates
-    selected_gg = gg[:N]
-
-    positions = selected_gg.translations.copy()
-    rotations = selected_gg.rotation_matrices.copy()
-
-    # robot pose : 180 degree rotation around z axis
-    R_180 = np.diag([-1.0, -1.0, 1.0])
-    positions = np.array([[robot_offset, 0.0, 0.0]]) + positions @ R_180.T
-    rotations = R_180 @ rotations @ R_180.T
-
-    # franka transform
-    franka_L = np.diag([1, -1, 1])
-    franka_R = np.array([[0, 0, -1], [0, 1, 0], [-1, 0, 0]])
-    rotations = franka_L @ rotations.transpose(0, 2, 1) @ franka_R
-
-    quats = R.from_matrix(rotations).as_quat()
-
-    # convert ee pose to tcp pose
-    positions, quats = ee_pose_from_tcp_pose(
-        robot,
-        tcp_pos=torch.tensor(positions, dtype=torch.float32),
-        tcp_quat=torch.tensor(quats, dtype=torch.float32),
+    gg = sorted_grasp_by_distance(start_point_3d[0], gg)
+    log.info(f"Closest grasp candidate(top 8): {gg[:8]}")
+    grasp_finder.visualize(
+        pcd,
+        gg[0:N],
+        image_only=True,
+        save_dir="3_object_grasping_vlm",
+        filename=f"qwen2.5vl_top_one_{task_name}",
     )
-    log.info(f"Final robot target position: {positions[0]}")
-    log.info(f"Final robot target quaternion: {quats[0]}")
-
-    ee_pos_target = positions.to("cuda:0").unsqueeze(1)
-    ee_quat_target = quats.to("cuda:0").unsqueeze(1)
-
-    grasp_pos = ee_pos_target.clone()
-    lift_pos = ee_pos_target.clone()
-
-    lift_pos[:, :, 2] += 0.2
-    log.info(f"grasp_pos: {grasp_pos}")
+    # Select Top N batch grasp candidates and convert to franka ee pose
+    ee_pos_target, ee_quat_target = grasp_to_franka(robot, gg[:N], robot_offset=robot_offset)
 
     motion_controller = MotionController(env, motion_gen, plan_config, obs_saver)
     motion_controller.control_gripper(open_gripper=True, step=20)
-    succ_index, _, _ = motion_controller.move_to_pose(grasp_pos, ee_quat_target, open_gripper=True)
-    assert succ_index is not None, "No successful motion plan found for grasping"
+    _, pos, quat = motion_controller.move_to_pose(ee_pos_target, ee_quat_target, open_gripper=True)
+    assert pos is not None, "No successful motion plan found for grasping"
     motion_controller.control_gripper(open_gripper=False, step=40)
-    motion_controller.move_to_pose(
-        lift_pos[succ_index : succ_index + 1], ee_quat_target[succ_index : succ_index + 1], open_gripper=False
-    )
+
+    # Move up
+    quat[:, 2] += 0.2
+    _, pos, quat = motion_controller.move_to_pose(pos.unsqueeze(1), quat.unsqueeze(1), open_gripper=False)
+
 
 
 obs_saver.save()
