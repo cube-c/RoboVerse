@@ -42,7 +42,9 @@ from metasim.sim import IdentityEnvWrapper
 
 rootutils.setup_root(__file__, pythonpath=True)
 log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
+import json
 import re
+from typing import Any, Dict, List
 
 from PIL import Image
 from scipy.spatial.transform import Rotation as R
@@ -87,7 +89,7 @@ class VLMPointExtractor:
             return_tensors="pt",
         )
         inputs = inputs.to(self.model.device)
-        generated_ids = self.model.generate(**inputs, max_new_tokens=256)
+        generated_ids = self.model.generate(**inputs, max_new_tokens=512)
         generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
         output_text = self.processor.batch_decode(
             generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
@@ -103,15 +105,106 @@ class VLMPointExtractor:
 
     def guide_action_sequence(self, img, prompt):
         # example prompt from LIBERO
-        prompt_suffix = 'Output action sequence of the robot for the task in the form of exact coordinates. \
-        The format of output should be like {"pick_up": [x, y], "put_down": [x, y]}'
+        prompt_suffix = 'Report action sequence of the robot in JSON format like this: \
+        [{"pick_up": [x, y], "put_down": [x, y]}, ...]'
         prompt = prompt + "\n" + prompt_suffix
         output_text = self.inference(img, prompt)
         log.info(f"Qwen2.5-VL action sequence: {output_text}")
-        return output_text
+        seq = self._extract_guide_action_sequence(output_text)
+        return seq
 
     def _extract_guide_action_sequence(self, text):
-        pass
+        def _is_pick_put_obj(obj: Any) -> bool:
+            if not isinstance(obj, dict):
+                return False
+            if not ("pick_up" in obj and "put_down" in obj):
+                return False
+
+            def ok(v):
+                return isinstance(v, (list, tuple)) and len(v) == 2 and all(isinstance(n, (int, float)) for n in v)
+
+            return ok(obj["pick_up"]) and ok(obj["put_down"])
+
+        def _normalize_pair(v):  # ints are usually what you want for pixels
+            x, y = v
+            return [int(x), int(y)]
+
+        def flatten(obj: Any):
+            out = []
+            if _is_pick_put_obj(obj):
+                out.append({
+                    "pick_up": _normalize_pair(obj["pick_up"]),
+                    "put_down": _normalize_pair(obj["put_down"]),
+                })
+            elif isinstance(obj, list):
+                for it in obj:
+                    if _is_pick_put_obj(it):
+                        out.append({
+                            "pick_up": _normalize_pair(it["pick_up"]),
+                            "put_down": _normalize_pair(it["put_down"]),
+                        })
+            return out
+
+        def code_fences(s: str) -> List[str]:
+            pat = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.IGNORECASE | re.DOTALL)
+            return [m.group(1) for m in pat.finditer(s)]
+
+        def balanced_json_slices(s: str) -> List[str]:
+            # find balanced {...} or [...] substrings, skipping over quoted strings
+            out, n, i = [], len(s), 0
+            while i < n:
+                if s[i] in "{[":
+                    stack = ["}" if s[i] == "{" else "]"]
+                    j = i + 1
+                    while j < n and stack:
+                        c = s[j]
+                        if c == '"':  # skip strings (with escapes)
+                            j += 1
+                            while j < n:
+                                if s[j] == "\\":
+                                    j += 2
+                                elif s[j] == '"':
+                                    j += 1
+                                    break
+                                else:
+                                    j += 1
+                            continue
+                        if c in "{[":
+                            stack.append("}" if c == "{" else "]")
+                        elif c in "}]":
+                            if not stack or c != stack[-1]:
+                                stack = []  # mismatch -> abort this slice
+                                break
+                            stack.pop()
+                        j += 1
+                    if not stack:  # found a balanced slice
+                        out.append(s[i:j])
+                        i = j
+                        continue
+                i += 1
+            return out
+
+        candidates = code_fences(text) + balanced_json_slices(text)
+        seen, results = set(), []
+        for cand in candidates:
+            cand = cand.strip()
+            if not cand:
+                continue
+            try:
+                obj = json.loads(cand)
+            except json.JSONDecodeError:
+                # minor cleanup: remove trailing commas
+                cand2 = re.sub(r",\s*([}\]])", r"\1", cand)
+                try:
+                    obj = json.loads(cand2)
+                except json.JSONDecodeError:
+                    continue
+            for item in flatten(obj):
+                key = json.dumps(item, sort_keys=True)
+                if key not in seen:
+                    seen.add(key)
+                    results.append(item)
+        return results
 
     def _extract_points_from_text(self, text, image_w, image_h):
         all_points = []
@@ -533,19 +626,3 @@ while True:
         print("Result:", result)
     except Exception as e:
         print("Error while running action:", e)
-
-
-from libero.libero import benchmark
-
-bd = benchmark.get_benchmark_dict()
-for i in bd.keys():
-    print(f"Benchmark {i}:")
-    try:
-        task_suite = bd[i]()
-    except Exception as e:
-        print(f"Error loading benchmark {i}: {e}")
-        continue
-    for j in range(task_suite.get_num_tasks()):
-        task = task_suite.get_task(j)
-        print(task.language)
-    print()
