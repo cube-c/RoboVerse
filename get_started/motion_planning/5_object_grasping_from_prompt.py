@@ -732,7 +732,6 @@ for step in range(1):
 
     # find the closest grasp candidate to the 3d point
     gg = sorted_grasp_by_distance(start_point_3d, gg)
-    log.info(f"Closest grasp candidate(top 8): {gg[:8]}")
     grasp_finder.visualize(
         pcd,
         gg[0:N],
@@ -749,9 +748,14 @@ for step in range(1):
 
     motion_controller = MotionController(env, motion_gen, plan_config, obs_saver)
     motion_controller.control_gripper(open_gripper=True, step=20)
-    _, pos, quat = motion_controller.move_to_pose(ee_pos_pickup, ee_quat_pickup, open_gripper=True)
+    succ_index, pos, quat = motion_controller.move_to_pose(ee_pos_pickup, ee_quat_pickup, open_gripper=True)
     obs_saver.save()
     assert pos is not None, "No successful motion plan found for grasping"
+    log.info(f"Grasp {gg[succ_index]}")
+    grasp_finder.visualize(
+        pcd, gg[succ_index:succ_index+1], image_only=True, save_dir="3_object_grasping_vlm", filename=f"gsnet_top_one_{task_name}"
+    )
+
     motion_controller.control_gripper(open_gripper=False, step=40)
 
     # Move up
