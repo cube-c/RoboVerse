@@ -563,18 +563,22 @@ class MotionController:
             obs, _, _, _, _ = env.step(actions)
             obs_saver.add(obs)
 
+        # # Implement attach object logic if open_gripper is False
+        # if not open_gripper:
+            # self.motion_gen.attach_objects_to_robot(joint_)
+
     def move_to_pose(self, ee_pos_target: torch.Tensor, ee_quat_target: torch.Tensor, open_gripper: bool = False):
         """Move the robot to the target pose."""
         joint_pos = self.get_joint_pos()
 
         ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
-        log.info(f"Target EE pose: {ik_goal}")
+        # log.info(f"Target EE pose: {ik_goal}")
         # log.info(f"Joint names: {self.motion_gen.kinematics.joint_names}")
         cu_js = JointState.from_position(
             position=joint_pos.repeat(ik_goal.batch, 1, 1), joint_names=list(self.robot.actuators.keys())
         )
         cu_js = JointState.get_ordered_joint_state(cu_js, self.motion_gen.kinematics.joint_names)
-        log.info(f"Current robot joint state: {cu_js}")
+        # log.info(f"Current robot joint state: {cu_js}")
         result = self.motion_gen.plan_batch(cu_js, ik_goal, self.plan_config)
         log.debug(f"Motion planning result:{result.success}")
 
@@ -649,7 +653,7 @@ class Args:
     num_envs: int = 1
     headless: bool = False
     task_name: str = "LiberoPickChocolatePudding"
-    prompt: str = "pick up the tomato sauce and place it in the basket"
+    prompt: str = "pick up the orange juice and place it in the basket"
 
     def __post_init__(self):
         """Post-initialization configuration."""
@@ -746,12 +750,16 @@ for step in range(1):
     motion_controller = MotionController(env, motion_gen, plan_config, obs_saver)
     motion_controller.control_gripper(open_gripper=True, step=20)
     _, pos, quat = motion_controller.move_to_pose(ee_pos_pickup, ee_quat_pickup, open_gripper=True)
+    obs_saver.save()
     assert pos is not None, "No successful motion plan found for grasping"
     motion_controller.control_gripper(open_gripper=False, step=40)
 
     # Move up
     pos[:, 2] += 0.2
+    log.info(f"Moving up to {pos}, with quaternion {quat}")
     _, pos, quat = motion_controller.move_to_pose(pos.unsqueeze(1), quat.unsqueeze(1), open_gripper=False)
+    obs_saver.save()
+    assert pos is not None, "No successful motion plan found for moving up"
 
     # Move to putdown position
     ee_pos_putdown, ee_quat_putdown = ee_pose_from_tcp_pose(robot, tcp_pos=tcp_pos_putdown, tcp_quat=quat.unsqueeze(1))
