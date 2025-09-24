@@ -77,5 +77,5 @@ class FrankaCfg(BaseRobotCfg):
     gripper_close_q = [0.0, 0.0]
 
     curobo_ref_cfg_name: str = "franka.yml"
-    curobo_tcp_rel_pos: tuple[float, float, float] = [0.0, 0.0, 0.10312 - 0.0]  # considering pose depth (0.03)
+    curobo_tcp_rel_pos: tuple[float, float, float] = [0.0, 0.0, 0.10312]
     curobo_tcp_rel_rot: tuple[float, float, float] = [0.0, 0.0, 0.0]

@@ -47,6 +47,7 @@ from curobo.types.state import JointState
 from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenPlanConfig
 from get_started.motion_planning.util_gsnet import GSNet
 from get_started.utils import ObsSaver, get_pcd_from_rgbd
+from metasim.cfg.robots.base_robot_cfg import BaseRobotCfg
 from metasim.cfg.scenario import ScenarioCfg
 from metasim.cfg.sensors import PinholeCameraCfg
 from metasim.constants import SimType
@@ -55,6 +56,7 @@ from metasim.utils import configclass
 from metasim.utils.camera_util import get_cam_params
 from metasim.utils.demo_util import get_traj
 from metasim.utils.kinematics_utils import ee_pose_from_tcp_pose, get_curobo_models_with_pcd
+from metasim.utils.math import matrix_from_quat
 from metasim.utils.setup_util import get_sim_env_class, get_task
 
 _debug = False
@@ -302,6 +304,9 @@ class GraspPoseFinder:
         grasps = self.gsnet.inference(np.array(pcd.points) @ self.transform_matrix)
         grasps.translations = grasps.translations @ self.transform_matrix.T
         grasps.rotation_matrices = self.transform_matrix @ grasps.rotation_matrices @ self.transform_matrix.T
+
+        # Filter out grasps that has width larger than 0.08 (franka finger width)
+        grasps = grasps[grasps.widths <= 0.08]
 
         # log best grasp candidate
         log.info(f"Total grasp candidates: {len(grasps)}")
@@ -565,26 +570,83 @@ class MotionController:
 
         # # Implement attach object logic if open_gripper is False
         # if not open_gripper:
-            # self.motion_gen.attach_objects_to_robot(joint_)
+        # self.motion_gen.attach_objects_to_robot(joint_)
+
+    def move_to_grasp(
+        self,
+        ee_pos_target: torch.Tensor,
+        ee_quat_target: torch.Tensor,
+        depth: float = 0.03,
+    ):
+        """Move the robot to the target pose."""
+        joint_pos = self.get_joint_pos()
+
+        ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
+        cu_js = JointState.from_position(
+            position=joint_pos.repeat(ik_goal.batch, 1), joint_names=list(self.robot.actuators.keys())
+        )
+        cu_js = JointState.get_ordered_joint_state(cu_js, self.motion_gen.kinematics.joint_names)
+        log.debug(f"Current robot joint state: {cu_js}")
+        result = self.motion_gen.plan_grasp(
+            start_state=cu_js,
+            grasp_poses=ik_goal,
+            plan_config=self.plan_config,
+            grasp_approach_offset=Pose(
+                position=torch.tensor([0.0, 0.0, -depth], device="cuda:0"),
+                quaternion=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda:0"),
+            ),
+            retract_offset=Pose(
+                position=torch.tensor([0.0, 0.0, -depth], device="cuda:0"),
+                quaternion=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda:0"),
+            ),
+            disable_collision_links=["panda_hand", "panda_leftfinger", "panda_rightfinger"],
+        )
+        log.debug(f"Motion planning result:{result.success}")
+        if not result.success:
+            log.debug("No successful grasp plan found.")
+            log.debug(f"Result: {result}")
+            return None, None, None
+        index = result.goalset_index.item()
+        log.debug(f"Grasp index: {index}")
+
+        def trajectory_plan(plan, open_gripper=False):
+            for i in range(plan.shape[0]):
+                # log.debug(f"Plan {i}: {plan[i : i + 1, :]}")
+                joint_pos[:, : self.curobo_n_dof] = plan[i : i + 1, :].position
+                joint_pos[:, -self.ee_n_dof :] = torch.tensor(
+                    self.robot.gripper_open_q if open_gripper else self.robot.gripper_close_q
+                )
+                actions = [
+                    {"dof_pos_target": dict(zip(self.robot.actuators.keys(), joint_pos[i_env].tolist()))}
+                    for i_env in range(scenario.num_envs)
+                ]
+                obs, _, _, _, _ = self.env.step(actions)
+                self.obs_saver.add(obs)
+
+        trajectory_plan(result.grasp_interpolated_trajectory, open_gripper=True)
+        self.control_gripper(open_gripper=False, step=20)
+        trajectory_plan(result.retract_interpolated_trajectory, open_gripper=False)
+
+        return index, ee_pos_target[:, index : index + 1, :], ee_quat_target[:, index : index + 1, :]
 
     def move_to_pose(self, ee_pos_target: torch.Tensor, ee_quat_target: torch.Tensor, open_gripper: bool = False):
         """Move the robot to the target pose."""
         joint_pos = self.get_joint_pos()
 
         ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
-        # log.info(f"Target EE pose: {ik_goal}")
+        log.info(f"Target EE pose: {ik_goal}")
         # log.info(f"Joint names: {self.motion_gen.kinematics.joint_names}")
         cu_js = JointState.from_position(
             position=joint_pos.repeat(ik_goal.batch, 1, 1), joint_names=list(self.robot.actuators.keys())
         )
         cu_js = JointState.get_ordered_joint_state(cu_js, self.motion_gen.kinematics.joint_names)
-        # log.info(f"Current robot joint state: {cu_js}")
+        log.info(f"Current robot joint state: {cu_js}")
         result = self.motion_gen.plan_batch(cu_js, ik_goal, self.plan_config)
         log.debug(f"Motion planning result:{result.success}")
 
         # choose the first successful result
-        succ_index = next((i for i, x in enumerate(result.success.tolist()) if x), None)
-        if succ_index is None:
+        index = next((i for i, x in enumerate(result.success.tolist()) if x), None)
+        if index is None:
             log.debug("No successful motion plan found.")
             log.debug(f"Result: {result}")
             return None, None, None
@@ -592,7 +654,7 @@ class MotionController:
         if len(result.success) == 1:
             cmd_plan = result.get_interpolated_plan().position
         else:
-            cmd_plan = result.get_paths()[succ_index].position
+            cmd_plan = result.get_paths()[index].position
         for i in range(cmd_plan.shape[0]):
             joint_pos[:, : self.curobo_n_dof] = cmd_plan[i : i + 1, :]
             joint_pos[:, -self.ee_n_dof :] = torch.tensor(
@@ -604,7 +666,7 @@ class MotionController:
             ]
             obs, _, _, _, _ = self.env.step(actions)
             self.obs_saver.add(obs)
-        return succ_index, ee_pos_target[succ_index], ee_quat_target[succ_index]
+        return index, ee_pos_target[index : index + 1, :, :], ee_quat_target[index : index + 1, :, :]
 
 
 def world_to_franka(robot, positions, rotations, robot_offset=1.15):
@@ -613,6 +675,28 @@ def world_to_franka(robot, positions, rotations, robot_offset=1.15):
     positions = np.array([[robot_offset, 0.0, 0.0]]) + positions @ R_180.T
     rotations = R_180 @ rotations @ R_180.T
     return positions, rotations
+
+
+def grasp_pose_from_tcp_pose(
+    robot_cfg: BaseRobotCfg, tcp_pos: torch.Tensor, tcp_quat: torch.Tensor, depth: float = 0.03
+):
+    """Calculate the end-effector (EE) pose from the tool center point (TCP) pose.
+
+    Note that currently only the translation is considered.
+
+    Args:
+        robot_cfg (BaseRobotCfg): Configuration object for the robot, containing the relative position of the TCP.
+        tcp_pos (torch.Tensor): The position of the TCP as a tensor.
+        tcp_quat (torch.Tensor): The orientation of the TCP as a tensor, in scalar-first quaternion.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor]: The position and orientation of the end-effector.
+    """
+    tcp_rel_pos = (
+        (torch.tensor(robot_cfg.curobo_tcp_rel_pos) + torch.tensor([0.0, 0.0, -depth])).unsqueeze(0).to(tcp_pos.device)
+    )
+    ee_pos = tcp_pos + torch.matmul(matrix_from_quat(tcp_quat), -tcp_rel_pos.unsqueeze(-1)).squeeze()
+    return ee_pos, tcp_quat
 
 
 def grasp_to_franka(robot, grasps):
@@ -629,14 +713,16 @@ def grasp_to_franka(robot, grasps):
     quats = R.from_matrix(rotations).as_quat()
 
     # convert ee pose to tcp pose
-    positions, quats = ee_pose_from_tcp_pose(
+    positions, quats = grasp_pose_from_tcp_pose(
         robot,
         tcp_pos=torch.tensor(positions, dtype=torch.float32),
         tcp_quat=torch.tensor(quats, dtype=torch.float32),
+        depth=0.03,
     )
 
-    ee_pos_target = positions.to("cuda:0").unsqueeze(1)
-    ee_quat_target = quats.to("cuda:0").unsqueeze(1)
+    # shape of (1, n_goalset, 3)
+    ee_pos_target = positions.to("cuda:0").unsqueeze(0)
+    ee_quat_target = quats.to("cuda:0").unsqueeze(0)
     return ee_pos_target, ee_quat_target
 
 
@@ -653,7 +739,7 @@ class Args:
     num_envs: int = 1
     headless: bool = False
     task_name: str = "LiberoPickChocolatePudding"
-    prompt: str = "pick up the orange juice and place it in the basket"
+    prompt: str = "pick up the bbq sauce and place it in the basket"
 
     def __post_init__(self):
         """Post-initialization configuration."""
@@ -748,25 +834,27 @@ for step in range(1):
 
     motion_controller = MotionController(env, motion_gen, plan_config, obs_saver)
     motion_controller.control_gripper(open_gripper=True, step=20)
-    succ_index, pos, quat = motion_controller.move_to_pose(ee_pos_pickup, ee_quat_pickup, open_gripper=True)
+    succ_index, pos, quat = motion_controller.move_to_grasp(ee_pos_pickup, ee_quat_pickup)
     obs_saver.save()
     assert pos is not None, "No successful motion plan found for grasping"
     log.info(f"Grasp {gg[succ_index]}")
     grasp_finder.visualize(
-        pcd, gg[succ_index:succ_index+1], image_only=True, save_dir="3_object_grasping_vlm", filename=f"gsnet_top_one_{task_name}"
+        pcd,
+        gg[succ_index : succ_index + 1],
+        image_only=True,
+        save_dir="3_object_grasping_vlm",
+        filename=f"gsnet_top_one_{task_name}",
     )
 
-    motion_controller.control_gripper(open_gripper=False, step=40)
-
     # Move up
-    pos[:, 2] += 0.2
+    pos[:, :, 2] += 0.2
     log.info(f"Moving up to {pos}, with quaternion {quat}")
-    _, pos, quat = motion_controller.move_to_pose(pos.unsqueeze(1), quat.unsqueeze(1), open_gripper=False)
+    _, pos, quat = motion_controller.move_to_pose(pos, quat, open_gripper=False)
     obs_saver.save()
     assert pos is not None, "No successful motion plan found for moving up"
 
     # Move to putdown position
-    ee_pos_putdown, ee_quat_putdown = ee_pose_from_tcp_pose(robot, tcp_pos=tcp_pos_putdown, tcp_quat=quat.unsqueeze(1))
+    ee_pos_putdown, ee_quat_putdown = ee_pose_from_tcp_pose(robot, tcp_pos=tcp_pos_putdown, tcp_quat=quat)
     motion_controller.move_to_pose(ee_pos_putdown, ee_quat_putdown, open_gripper=False)
     motion_controller.control_gripper(open_gripper=True, step=40)
 
