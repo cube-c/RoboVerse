@@ -103,17 +103,7 @@ def get_curobo_models_with_pcd(pcd: o3d.geometry.PointCloud, robot_cfg: BaseRobo
     motion_gen = MotionGen(motion_gen_config)
     motion_gen.warmup()
 
-    plan_config = MotionGenPlanConfig(
-        enable_graph=False,
-        max_attempts=10,
-        enable_graph_attempt=None,
-        enable_finetune_trajopt=True,
-        partial_ik_opt=False,
-        parallel_finetune=True,
-        # time_dilation_factor=0.75,
-    )
-
-    return motion_gen, plan_config
+    return motion_gen
 
 
 def ee_pose_from_tcp_pose(robot_cfg: BaseRobotCfg, tcp_pos: torch.Tensor, tcp_quat: torch.Tensor):
