@@ -1,17 +1,13 @@
 """This module provides utility functions for kinematics calculations using the curobo library."""
 
-import numpy as np
-import open3d as o3d
 import torch
-from loguru import logger as log
 
 from curobo.cuda_robot_model.cuda_robot_model import CudaRobotModel
-from curobo.geom.types import Cuboid, Mesh, PointCloud, WorldConfig
+from curobo.geom.types import Cuboid, WorldConfig
 from curobo.types.base import TensorDeviceType
 from curobo.types.robot import RobotConfig
 from curobo.util_file import get_robot_path, join_path, load_yaml
 from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
-from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenConfig, MotionGenPlanConfig
 from metasim.cfg.robots.base_robot_cfg import BaseRobotCfg
 from metasim.utils.math import matrix_from_quat
 
@@ -61,49 +57,6 @@ def get_curobo_models(robot_cfg: BaseRobotCfg, no_gnd=False):
         return robot_state.ee_position, robot_state.ee_quaternion
 
     return kin_model, do_fk, ik_solver
-
-
-def get_curobo_models_with_pcd(pcd: o3d.geometry.PointCloud, robot_cfg: BaseRobotCfg):
-    """Initializes and returns the curobo kinematic model, forward kinematics function, and inverse kinematics solver for a given robot configuration.
-
-    Args:
-        pcd (o3d.geometry.PointCloud): The point cloud representing the environment for collision checking.
-        robot_cfg (BaseRobotCfg): The configuration object for the robot.
-
-    Returns:
-        tuple: A tuple containing:
-            - kin_model (CudaRobotModel): The kinematic model of the robot.
-            - do_fk (function): A function that performs forward kinematics given joint positions.
-            - ik_solver (IKSolver): The inverse kinematics solver configured for the robot.
-    """
-    tensor_args = TensorDeviceType()
-    robot_cfg = load_yaml(join_path(get_robot_path(), robot_cfg.curobo_ref_cfg_name))["robot_cfg"]
-    # robot_cfg["kinematics"]["collision_spheres"] = "spheres/franka_collision_mesh.yml"
-    world_cfg = WorldConfig(
-        cuboid=[
-            Cuboid(
-                name="ground",
-                pose=[0.0, 0.0, -0.4, 1.0, 0.0, 0.0, 0.0],
-                dims=[10.0, 10.0, 0.8],
-            ),
-        ],
-        # TODO: is there any better method (using nvblox?)
-        # TODO: get robot position and quaternion from args and apply to mesh pose
-        mesh=[Mesh.from_pointcloud(np.asarray(pcd.points), pose=[1.15, 0.0, 0.0, 0, 0, 0, 1], pitch=0.005)],
-    )
-    world_cfg.save_world_as_mesh("get_started/output/motion_planning/3_object_grasping_vlm/world.ply")
-    motion_gen_config = MotionGenConfig.load_from_robot_config(
-        robot_cfg,
-        world_cfg,
-        tensor_args,
-        self_collision_check=True,
-        self_collision_opt=True,
-        use_cuda_graph=False,  # True
-    )
-    motion_gen = MotionGen(motion_gen_config)
-    motion_gen.warmup()
-
-    return motion_gen
 
 
 def ee_pose_from_tcp_pose(robot_cfg: BaseRobotCfg, tcp_pos: torch.Tensor, tcp_quat: torch.Tensor):

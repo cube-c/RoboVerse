@@ -41,10 +41,15 @@ from rich.logging import RichHandler
 from scipy.spatial.transform import Rotation as R
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
+from curobo.cuda_robot_model.cuda_robot_model import CudaRobotModel
+from curobo.geom.types import Cuboid, Mesh, PointCloud, WorldConfig
+from curobo.types.base import TensorDeviceType
 from curobo.types.math import Pose
 from curobo.types.robot import JointState
+from curobo.types.robot import RobotConfig
 from curobo.types.state import JointState
-from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenPlanConfig
+from curobo.util_file import get_robot_path, join_path, load_yaml
+from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenPlanConfig, MotionGenConfig
 from get_started.motion_planning.util_gsnet import GSNet
 from get_started.utils import ObsSaver, get_pcd_from_rgbd
 from metasim.cfg.robots.base_robot_cfg import BaseRobotCfg
@@ -55,12 +60,9 @@ from metasim.sim import IdentityEnvWrapper
 from metasim.utils import configclass
 from metasim.utils.camera_util import get_cam_params
 from metasim.utils.demo_util import get_traj
-from metasim.utils.kinematics_utils import ee_pose_from_tcp_pose, get_curobo_models_with_pcd
+from metasim.utils.kinematics_utils import ee_pose_from_tcp_pose
 from metasim.utils.math import matrix_from_quat
 from metasim.utils.setup_util import get_sim_env_class, get_task
-
-_debug = False
-
 
 class VLMPointExtractor:
     def __init__(self, ckpt_path="Qwen/Qwen2.5-VL-7B-Instruct"):
@@ -326,6 +328,354 @@ class GraspPoseFinder:
         self.gsnet.visualize(pcd_clone, grasps_clone, image_only=image_only, save_dir=save_dir, filename=filename)
 
 
+class TrajOptimizer:
+    """
+    TrajOptimizer is used to optimize the trajectory of the robot.
+    It gets the point cloud, robot pose, robot config, prompt and return the optimized trajectory.
+    It must not be dependent on the RoboVerse simulator setup. (only curobo is used)
+
+    Args:
+        pcd: Point cloud
+        camera: Camera
+        image: RGB Image rendered from camera
+        robot_pose: Robot pose
+        robot_config: Curobo robot config
+    """
+    def __init__(self, robot_pose: List[float]):
+        self.point_extractor = VLMPointExtractor()
+        self.grasp_finder = GraspPoseFinder()
+        self.robot_position = np.array(robot_pose[:3])
+        self.robot_orientation = np.array(robot_pose[3:]) # quaternion
+        self.robot_rotation_matrix = R.from_quat(self.robot_orientation).as_matrix()
+
+        self.robot_gripper_open_q = [0.04, 0.04]
+        self.robot_gripper_close_q = [0.00, 0.00]
+        self.robot_tcp_rel_pos = [0.0, 0.0, 0.10312]
+        self.curobo_n_dof = 7
+        self.ee_n_dof = 2
+
+        tensor_args = TensorDeviceType()
+        self.config_file = load_yaml(join_path(get_robot_path(), "franka.yml"))["robot_cfg"]
+        # config_file = load_yaml(join_path(get_robot_path(), robot_cfg.curobo_ref_cfg_name))["robot_cfg"]
+        self.robot_config = RobotConfig.from_dict(self.config_file, tensor_args)
+        self.kin_model = CudaRobotModel(self.robot_config.kinematics)
+        log.info(f"Joint names: {self.kin_model.joint_names}")
+
+
+    def _get_3d_point_from_pixel(self, pixel_point, depth, cam_intr_mat, cam_extr_mat):
+        """
+        Convert 2D pixel coordinates to 3D points using the point cloud.
+
+        Since the point cloud was generated from RGBD using get_pcd_from_rgbd(),
+        there's a direct mapping between pixels and 3D points.
+
+        Args:
+            pixel_points: List of 2D pixel coordinates [(x, y), ...]
+            pcd_array: numpy array of point cloud
+            camera_intrinsics: Camera intrinsic matrix (optional)
+            camera_extrinsics: Camera extrinsic matrix (optional)
+
+        Returns:
+            List of 3D points [(x, y, z), ...]
+        """
+        x, y = int(pixel_point[0]), int(pixel_point[1])
+        z = depth[y, x].item()
+        log.info(f"depth: {z}")
+
+        # 2. Unproject (x, y, z) into camera coordinates
+        fx = cam_intr_mat[0, 0]
+        fy = cam_intr_mat[1, 1]
+        cx = cam_intr_mat[0, 2]
+        cy = cam_intr_mat[1, 2]
+        log.info(f"fx: {fx}, fy: {fy}, cx: {cx}, cy: {cy}")
+
+        x_cam = (x - cx) * z / fx
+        y_cam = (y - cy) * z / fy
+        z_cam = z
+        log.info(f"x_cam: {x_cam}, y_cam: {y_cam}, z_cam: {z_cam}")
+
+        point_cam = np.array([x_cam, y_cam, z_cam, 1.0])  # homogeneous coordinates
+
+        # 3. Transform to world coordinates using extrinsic matrix
+        cam_extr = np.array(cam_extr_mat)  # should be a 4x4 matrix
+        cam_extr = np.linalg.inv(cam_extr)
+        log.info(f"cam_extr: {cam_extr}")
+        point_world = cam_extr @ point_cam
+
+        # 4. Get 3D coordinate in world space
+        xyz = point_world[:3]
+        log.info(f"xyz: {xyz}")
+        return xyz
+
+
+    def _filter_out_robot_from_pcd(self, pcd: o3d.geometry.PointCloud) -> o3d.geometry.PointCloud:
+        """
+        Filtering out a robot region from pcd.
+        """
+        # Currently this is a hard-coded script, based on initial robot position
+        # TODO : remove robot using segmentation
+        # ex) https://github.com/NVlabs/curobo/blob/ebb71702f3f70e767f40fd8e050674af0288abe8/examples/robot_image_segmentation_example.py
+        points = np.array(pcd.points)
+        colors = np.array(pcd.colors)
+
+        robot_offset = np.array([0.0, 0.0, 1.0]) + self.robot_position
+        robot_dimension = np.array([0.3, 0.3, 2.0])
+        point_mask = np.logical_and(
+            np.logical_or(
+                np.abs(points[:, 0] - robot_offset[0]) > robot_dimension[0] / 2,
+                np.abs(points[:, 1] - robot_offset[1]) > robot_dimension[1] / 2,
+                np.abs(points[:, 2] - robot_offset[2]) > robot_dimension[2] / 2,
+            ),
+            points[:, 2] < 0.3,
+        )
+        points_filtered = points[point_mask]
+        colors_filtered = colors[point_mask]
+        pcd_filtered = o3d.geometry.PointCloud()
+        pcd_filtered.points = o3d.utility.Vector3dVector(points_filtered)
+        pcd_filtered.colors = o3d.utility.Vector3dVector(colors_filtered)
+        return pcd_filtered
+
+    def _sorted_grasp_by_distance(self, target_point, grasp_group):
+        dists = [np.linalg.norm(g.translation - target_point) for g in grasp_group]
+        sorted_indices = np.argsort(dists)
+        return grasp_group[sorted_indices]
+
+    def _grasp_to_franka(self, grasps):
+        """Convert the grasp pose to franka end-effector pose."""
+        positions = grasps.translations.copy()
+        rotations = grasps.rotation_matrices.copy()
+        positions, rotations = self._world_to_franka(positions, rotations)
+
+        # franka transform
+        franka_L = np.diag([1, -1, 1])
+        franka_R = np.array([[0, 0, -1], [0, 1, 0], [-1, 0, 0]])
+        rotations = franka_L @ rotations.transpose(0, 2, 1) @ franka_R
+
+        quats = R.from_matrix(rotations).as_quat()
+
+        # convert ee pose to tcp pose
+        positions, quats = self._ee_pose_from_tcp_pose(
+            tcp_pos=torch.tensor(positions, dtype=torch.float32),
+            tcp_quat=torch.tensor(quats, dtype=torch.float32),
+            depth=0.03,
+        )
+
+        # shape of (1, n_goalset, 3)
+        ee_pos_target = positions.to("cuda:0").unsqueeze(0)
+        ee_quat_target = quats.to("cuda:0").unsqueeze(0)
+        return ee_pos_target, ee_quat_target
+
+    def _ee_pose_from_tcp_pose(self, tcp_pos, tcp_quat, depth):
+        tcp_rel_pos = (
+            (torch.tensor(self.robot_tcp_rel_pos) + torch.tensor([0.0, 0.0, -depth])).unsqueeze(0).to(tcp_pos.device)
+        )
+        ee_pos = tcp_pos + torch.matmul(matrix_from_quat(tcp_quat), -tcp_rel_pos.unsqueeze(-1)).squeeze()
+        return ee_pos, tcp_quat
+
+    def _world_to_franka(self, positions, rotations):
+        positions = self.robot_position + positions @ self.robot_rotation_matrix.T
+        rotations = self.robot_rotation_matrix @ rotations @ self.robot_rotation_matrix.T
+        return positions, rotations
+
+    def _set_motion_gen_with_pcd(self, pcd):
+        world_cfg = WorldConfig(
+            cuboid=[
+                Cuboid(
+                    name="ground",
+                    pose=[0.0, 0.0, -0.4, 1.0, 0.0, 0.0, 0.0],
+                    dims=[10.0, 10.0, 0.8],
+                ),
+            ],
+            # TODO: is there any better method (using nvblox?)
+            # TODO: get robot position and quaternion from args and apply to mesh pose
+            mesh=[Mesh.from_pointcloud(np.asarray(pcd.points), pose=[1.15, 0.0, 0.0, 0, 0, 0, 1], pitch=0.005)],
+        )
+        world_cfg.save_world_as_mesh("get_started/output/motion_planning/3_object_grasping_vlm/world.ply")
+        motion_gen_config = MotionGenConfig.load_from_robot_config(
+            self.robot_config,
+            world_cfg,
+            TensorDeviceType(),
+            self_collision_check=True,
+            self_collision_opt=True,
+            use_cuda_graph=False,  # True
+        )
+        motion_gen = MotionGen(motion_gen_config)
+        motion_gen.warmup()
+
+        self.motion_gen = motion_gen
+
+    def do_fk(self, q: torch.Tensor):
+        # TODO: check length and truncate if needed (does it consider ee links?)
+        log.info(f"q: {q}")
+        robot_state = self.kin_model.get_state(q, self.config_file["kinematics"]["ee_link"])
+        return robot_state.ee_position, robot_state.ee_quaternion
+
+
+    def get_plan_config(self):
+        return MotionGenPlanConfig(
+            enable_graph=False,
+            max_attempts=10,
+            enable_graph_attempt=None,
+            enable_finetune_trajopt=True,
+            partial_ik_opt=False,
+            parallel_finetune=True,
+        )
+
+    def get_joint_state(self, joint_pos: torch.Tensor):
+        cu_js = JointState.from_position(
+            position=joint_pos[:, :self.curobo_n_dof],
+            joint_names=self.kin_model.joint_names
+        )
+        cu_js = JointState.get_ordered_joint_state(cu_js, self.kin_model.joint_names)
+        return cu_js
+
+    def plan_gripper(self, js: JointState, open_gripper: bool, step: int = 20):
+        joint_pos = js.position.squeeze().repeat(step, 1)
+        joint_pos[:, -self.ee_n_dof :] = torch.tensor(
+            self.robot_gripper_open_q if open_gripper else self.robot_gripper_close_q
+        )
+        return joint_pos
+
+    def plan_grasp(
+        self,
+        js: JointState,
+        ee_pos_target: torch.Tensor,
+        ee_quat_target: torch.Tensor,
+        depth: float = 0.03, # TODO: use depth from grasp finder
+    ):
+        """Plan the grasp."""
+        ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
+        log.info(f"Target EE pose: {ik_goal}")
+        log.info(f"Joint names: {self.kin_model.joint_names}")
+        log.debug(f"Current robot joint state: {js}")
+        result = self.motion_gen.plan_grasp(
+            start_state=js,
+            grasp_poses=ik_goal,
+            plan_config=self.get_plan_config(),
+            grasp_approach_offset=Pose(
+                position=torch.tensor([0.0, 0.0, -depth], device="cuda:0"),
+                quaternion=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda:0"),
+            ),
+            retract_offset=Pose(
+                position=torch.tensor([0.0, 0.0, -depth], device="cuda:0"),
+                quaternion=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda:0"),
+            ),
+            disable_collision_links=["panda_hand", "panda_leftfinger", "panda_rightfinger"],
+        )
+        log.debug(f"Motion planning result:{result.success}")
+        if not result.success:
+            log.debug("No successful grasp plan found.")
+            log.debug(f"Result: {result}")
+            return None, None, None
+        index = result.goalset_index.item()
+        log.debug(f"Grasp index: {index}")
+
+        def trajectory_plan(plan, open_gripper=False):
+            joint_pos = torch.zeros((plan.shape[0], self.curobo_n_dof + self.ee_n_dof), device="cuda:0")
+            joint_pos[:, : self.curobo_n_dof] = plan[:, :].position
+            joint_pos[:, -self.ee_n_dof :] = torch.tensor(
+                self.robot_gripper_open_q if open_gripper else self.robot_gripper_close_q
+            )
+            return joint_pos
+
+        joint_pos = []
+        joint_pos.append(trajectory_plan(result.grasp_interpolated_trajectory, open_gripper=True))
+        joint_pos.append(self.plan_gripper(js, open_gripper=False, step=20))
+        joint_pos.append(trajectory_plan(result.retract_interpolated_trajectory, open_gripper=False))
+        joint_pos = torch.cat(joint_pos, dim=0)
+        return joint_pos
+
+    def plan_pose_single(
+        self,
+        js: JointState,
+        ee_pos_target: torch.Tensor,
+        ee_quat_target: torch.Tensor,
+        open_gripper: bool = False
+    ):
+        """Move the robot to the target pose."""
+        cu_js = JointState.from_position(
+            position=js.position.unsqueeze(0),
+            joint_names=self.kin_model.joint_names
+        )
+        cu_js = JointState.get_ordered_joint_state(cu_js, self.kin_model.joint_names)
+        ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
+        log.info(f"Target EE pose: {ik_goal}")
+        log.info(f"Current robot joint state: {cu_js}")
+        result = self.motion_gen.plan_single(cu_js, ik_goal, self.get_plan_config())
+        log.debug(f"Motion planning result:{result.success}")
+
+        if not result.success:
+            log.debug("No successful motion plan found.")
+            log.debug(f"Result: {result}")
+            return None
+
+        cmd_plan = result.get_interpolated_plan().position
+        joint_pos = torch.zeros((cmd_plan.shape[0], self.curobo_n_dof + self.ee_n_dof), device="cuda:0")
+        joint_pos[:, : self.curobo_n_dof] = cmd_plan[:, :]
+        joint_pos[:, -self.ee_n_dof :] = torch.tensor(
+            self.robot_gripper_open_q if open_gripper else self.robot_gripper_close_q
+        )
+        return joint_pos
+
+
+    def plan_trajectory(self, js: JointState, img, depth, pcd, prompt, camera_intr_mat, camera_extr_mat):
+        seq = self.point_extractor.extract_sequence(img, prompt)
+        assert isinstance(seq, list) and len(seq) > 0, "No valid action sequence found"
+
+        # TODO: support multiple steps in a sequence
+        # Get 3D points from pixel coordinates
+        start_point = seq[0]["pick_up"]
+        end_point = seq[0]["put_down"]
+
+        log.info(f"3d point of pixel: {start_point} / {end_point}")
+        start_point_3d = self._get_3d_point_from_pixel(start_point, depth, camera_intr_mat, camera_extr_mat)
+        end_point_3d = self._get_3d_point_from_pixel(end_point, depth, camera_intr_mat, camera_extr_mat)
+
+        # TODO: get robot pose from this function
+        pcd = self._filter_out_robot_from_pcd(pcd)
+        self._set_motion_gen_with_pcd(pcd)
+
+        # TODO: filter out pcd that are not close from start point, before getting the grasp candidates
+        N = 8
+        gg = self.grasp_finder.find(pcd)
+        gg = self._sorted_grasp_by_distance(start_point_3d, gg)
+        self.grasp_finder.visualize(
+            pcd,
+            gg[0:N],
+            image_only=True,
+            save_dir="3_object_grasping_vlm",
+            filename=f"qwen2.5vl_top_one_{prompt}",
+        )
+        ee_pos_pickup, ee_quat_pickup = self._grasp_to_franka(gg[:N])
+
+        # Grasp
+        joint_pos = []
+        joint_pos.append(self.plan_gripper(js, open_gripper=True, step=20))
+        js = self.get_joint_state(joint_pos[-1][-1:, :])
+
+        # Pick up
+        ee_pos_pickup[:, :, 2] += 0.2
+        joint_pos.append(self.plan_pose_single(js, ee_pos_pickup[0], ee_quat_pickup[0], open_gripper=False))
+        js = self.get_joint_state(joint_pos[-1][-1:, :])
+
+        # Put down
+        tcp_pos_putdown, _ = self._world_to_franka(np.array([end_point_3d]), np.eye(3))
+        tcp_pos_putdown = torch.tensor(tcp_pos_putdown, dtype=torch.float32).unsqueeze(1).to("cuda:0")
+        tcp_pos_putdown[0, 0, 2] += 0.3  # lift up a bit
+        ee_pos_putdown, ee_quat_putdown = self._ee_pose_from_tcp_pose(tcp_pos_putdown, ee_quat_pickup, depth)
+        joint_pos.append(self.plan_pose_single(js, ee_pos_putdown[0], ee_quat_putdown[0], open_gripper=False))
+        js = self.get_joint_state(joint_pos[-1][-1:, :])
+
+        # Open Gripper
+        joint_pos.append(self.plan_gripper(js, open_gripper=True, step=20))
+
+        # TODO: attach object to robot
+        # Concat All Plans
+        joint_pos = torch.cat(joint_pos, dim=0)
+        return joint_pos
+
+
+
 def get_environment(scenario, sim="isaaclab", robot_offset=1.15):
     """Initialize the simulation environment."""
     log.info(f"Using simulator: {sim}")
@@ -406,7 +756,7 @@ def get_point_cloud_from_camera(img, depth, camera, output_suffix=""):
     return pcd, intr, extr
 
 
-def get_point_cloud_from_obs(obs, save_pcd=False):
+def get_point_cloud_from_obs(obs):
     # check shapes
     #######################################################################
     # merge pcds
@@ -452,335 +802,73 @@ def get_point_cloud_from_obs(obs, save_pcd=False):
     return pcd_merged, depth[0], intr[0], extr[0]
 
 
-def sorted_grasp_by_distance(target_point, grasp_group):
-    dists = [np.linalg.norm(g.translation - target_point) for g in grasp_group]
-    sorted_indices = np.argsort(dists)
-    return grasp_group[sorted_indices]
-
-
-def get_3d_point_from_pixel(pixel_point, depth, cam_intr_mat, cam_extr_mat):
-    """
-    Convert 2D pixel coordinates to 3D points using the point cloud.
-
-    Since the point cloud was generated from RGBD using get_pcd_from_rgbd(),
-    there's a direct mapping between pixels and 3D points.
-
-    Args:
-        pixel_points: List of 2D pixel coordinates [(x, y), ...]
-        pcd_array: numpy array of point cloud
-        camera_intrinsics: Camera intrinsic matrix (optional)
-        camera_extrinsics: Camera extrinsic matrix (optional)
-
-    Returns:
-        List of 3D points [(x, y, z), ...]
-    """
-    x, y = int(pixel_point[0]), int(pixel_point[1])
-    # z = depth[y, x][0].item()  # depth[y, x] gives depth in meters
-    z = depth[y, x].item() # mujoco
-    log.info(f"depth: {z}")
-
-    # 2. Unproject (x, y, z) into camera coordinates
-    fx = cam_intr_mat[0, 0]
-    fy = cam_intr_mat[1, 1]
-    cx = cam_intr_mat[0, 2]
-    cy = cam_intr_mat[1, 2]
-    log.info(f"fx: {fx}, fy: {fy}, cx: {cx}, cy: {cy}")
-
-    x_cam = (x - cx) * z / fx
-    y_cam = (y - cy) * z / fy
-    z_cam = z
-    log.info(f"x_cam: {x_cam}, y_cam: {y_cam}, z_cam: {z_cam}")
-
-    point_cam = np.array([x_cam, y_cam, z_cam, 1.0])  # homogeneous coordinates
-
-    # 3. Transform to world coordinates using extrinsic matrix
-    cam_extr = np.array(cam_extr_mat)  # should be a 4x4 matrix
-    cam_extr = np.linalg.inv(cam_extr)
-    log.info(f"cam_extr: {cam_extr}")
-    point_world = cam_extr @ point_cam
-
-    # 4. Get 3D coordinate in world space
-    xyz = point_world[:3]
-    log.info(f"xyz: {xyz}")
-    return xyz
-
-
-def filter_out_robot_from_pcd(pcd: o3d.geometry.PointCloud) -> o3d.geometry.PointCloud:
-    """
-    Filtering out a robot region from pcd.
-    """
-    # Currently this is a hard-coded script, based on initial robot position which is centered at (1.15, 0.0, 1.0) and dimension is (0.3, 0.3, 2.0)
-    # TODO : remove robot using segmentation
-    # ex) https://github.com/NVlabs/curobo/blob/ebb71702f3f70e767f40fd8e050674af0288abe8/examples/robot_image_segmentation_example.py
-    points = np.array(pcd.points)
-    colors = np.array(pcd.colors)
-
-    robot_offset = np.array([1.15, 0.0, 1.0])
-    robot_dimension = np.array([0.3, 0.3, 2.0])  # x, y, z dimensions
-    point_mask = np.logical_and(
-        np.logical_or(
-            np.abs(points[:, 0] - robot_offset[0]) > robot_dimension[0] / 2,
-            np.abs(points[:, 1] - robot_offset[1]) > robot_dimension[1] / 2,
-            np.abs(points[:, 2] - robot_offset[2]) > robot_dimension[2] / 2,
-        ),
-        points[:, 2] < 0.3,
-    )
-    points_filtered = points[point_mask]
-    colors_filtered = colors[point_mask]
-    pcd_filtered = o3d.geometry.PointCloud()
-    pcd_filtered.points = o3d.utility.Vector3dVector(points_filtered)
-    pcd_filtered.colors = o3d.utility.Vector3dVector(colors_filtered)
-    return pcd_filtered
-
-
 class MotionController:
+    """
+    MotionController is used to control the robot from prompt.
+    It gets the prompt and return the trajectory.
+    It is dependent on the RoboVerse simulator setup.
+    """
     def __init__(
         self,
         sim: str,
         env: IdentityEnvWrapper,
-        motion_gen: MotionGen,
         obs_saver: ObsSaver,
+        traj_optimizer: TrajOptimizer,
     ):
         self.sim = sim
         self.env = env
-        self.motion_gen = motion_gen
         self.obs_saver = obs_saver
-
         self.robot = env.handler.robots[0]
-        self.ee_n_dof = len(self.robot.gripper_open_q)
-        self.curobo_n_dof = len(motion_gen.kinematics.joint_names)
+        self.traj_optimizer = traj_optimizer
+
+    def dummy_action(self, step: int):
+        return torch.tensor(list(self.robot.default_joint_positions.values())).repeat(step, 1)
 
     def wrap_action(self, actions):
         if self.sim == "isaaclab":
-            return [{"dof_pos_target": action} for action in actions]
+            return [{"dof_pos_target": dict(zip(self.robot.actuators.keys(), action.tolist()))} for action in actions]
         elif self.sim == "mujoco":
-            return [{self.robot.name: {"dof_pos_target": action}} for action in actions]
+            return [{self.robot.name: {"dof_pos_target": dict(zip(
+                self.robot.actuators.keys(), action.tolist()
+            ))}} for action in actions]
+        else:
+            raise ValueError(f"Invalid simulator: {self.sim}")
 
-    def get_plan_config(self):
-        return MotionGenPlanConfig(
-            enable_graph=False,
-            max_attempts=10,
-            enable_graph_attempt=None,
-            enable_finetune_trajopt=True,
-            partial_ik_opt=False,
-            parallel_finetune=True,
-            # time_dilation_factor=0.75,
-        )
-
-    def get_joint_pos(self):
+    def get_joint_state(self):
         """Get the current joint position."""
         joint_reindex = self.env.handler.get_joint_reindex(self.robot.name)
         joint_pos = self.env.handler.get_states().robots[self.robot.name].joint_pos.cuda()
-        print(f"joint_reindex: {joint_reindex}")
-        print(f"joint_pos: {joint_pos}")
-        joint_pos = joint_pos[:, torch.argsort(torch.tensor(joint_reindex))]
-        return joint_pos
-
-    def control_gripper(self, open_gripper: bool, step: int = 20):
-        joint_pos = self.get_joint_pos()
-        joint_pos[:, -self.ee_n_dof :] = torch.tensor(
-            self.robot.gripper_open_q if open_gripper else self.robot.gripper_close_q
+        js = JointState.from_position(
+            position=joint_pos[:, torch.argsort(torch.tensor(joint_reindex))], joint_names=self.robot.actuators.keys()
         )
-        actions = self.wrap_action([
-            dict(zip(self.robot.actuators.keys(), joint_pos[i_env].tolist()))
-            for i_env in range(self.env.handler.num_envs)
-        ])
-        log.info(f"Gripper actions: {actions}")
-        for _ in range(step):
-            obs, _, _, _, _ = self.env.step(actions)
-            self.obs_saver.add(obs)
+        log.info(f"Current robot joint state: {js}")
+        return js
 
-        # # Implement attach object logic if open_gripper is False
-        # if not open_gripper:
-        # self.motion_gen.attach_objects_to_robot(joint_)
-
-    def move_to_grasp(
-        self,
-        ee_pos_target: torch.Tensor,
-        ee_quat_target: torch.Tensor,
-        depth: float = 0.03,
-    ):
-        """Move the robot to the target pose."""
-        joint_pos = self.get_joint_pos()
-
-        ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
-        cu_js = JointState.from_position(
-            position=joint_pos.repeat(ik_goal.batch, 1), joint_names=list(self.robot.actuators.keys())
-        )
-        cu_js = JointState.get_ordered_joint_state(cu_js, self.motion_gen.kinematics.joint_names)
-        log.debug(f"Current robot joint state: {cu_js}")
-        result = self.motion_gen.plan_grasp(
-            start_state=cu_js,
-            grasp_poses=ik_goal,
-            plan_config=self.get_plan_config(),
-            grasp_approach_offset=Pose(
-                position=torch.tensor([0.0, 0.0, -depth], device="cuda:0"),
-                quaternion=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda:0"),
-            ),
-            retract_offset=Pose(
-                position=torch.tensor([0.0, 0.0, -depth], device="cuda:0"),
-                quaternion=torch.tensor([1.0, 0.0, 0.0, 0.0], device="cuda:0"),
-            ),
-            disable_collision_links=["panda_hand", "panda_leftfinger", "panda_rightfinger"],
-        )
-        log.debug(f"Motion planning result:{result.success}")
-        if not result.success:
-            log.debug("No successful grasp plan found.")
-            log.debug(f"Result: {result}")
-            return None, None, None
-        index = result.goalset_index.item()
-        log.debug(f"Grasp index: {index}")
-
-        def trajectory_plan(plan, open_gripper=False):
-            for i in range(plan.shape[0]):
-                # log.debug(f"Plan {i}: {plan[i : i + 1, :]}")
-                joint_pos[:, : self.curobo_n_dof] = plan[i : i + 1, :].position
-                joint_pos[:, -self.ee_n_dof :] = torch.tensor(
-                    self.robot.gripper_open_q if open_gripper else self.robot.gripper_close_q
-                )
-                actions = self.wrap_action([
-                    dict(zip(self.robot.actuators.keys(), joint_pos[i_env].tolist()))
-                    for i_env in range(scenario.num_envs)
-                ])
-                obs, _, _, _, _ = self.env.step(actions)
+    def act(self, actions, save_obs: bool = True):
+        """Act the robot and save the observation"""
+        actions = self.wrap_action(actions)
+        for action in actions:
+            log.info(f"Action: {action}")
+            obs, _, _, _, _ = self.env.step([action])
+            if save_obs:
                 self.obs_saver.add(obs)
+        if save_obs:
+            self.obs_saver.save()
+        return obs
 
-        trajectory_plan(result.grasp_interpolated_trajectory, open_gripper=True)
-        self.control_gripper(open_gripper=False, step=20)
-        trajectory_plan(result.retract_interpolated_trajectory, open_gripper=False)
+    def simulate_from_prompt(self, prompt: str):
+        """Simulate the robot from prompt."""
+        actions = self.dummy_action(120)
+        obs = self.act(actions, save_obs=False)
 
-        return index, ee_pos_target[:, index : index + 1, :], ee_quat_target[:, index : index + 1, :]
+        img = Image.fromarray(obs.cameras["camera0"].rgb[0].cpu().numpy())
+        pcd, depth, cam_intr_mat, cam_extr_mat = get_point_cloud_from_obs(obs)
 
-    def move_to_pose_single(self, ee_pos_target: torch.Tensor, ee_quat_target: torch.Tensor, open_gripper: bool = False):
-        """Move the robot to the target pose."""
-        joint_pos = self.get_joint_pos()
+        js = self.get_joint_state()
+        actions = self.traj_optimizer.plan_trajectory(js, img, depth, pcd, prompt, cam_intr_mat, cam_extr_mat)
+        obs = self.act(actions, save_obs=True)
+        return obs
 
-        ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
-        log.info(f"Target EE pose: {ik_goal}")
-        # log.info(f"Joint names: {self.motion_gen.kinematics.joint_names}")
-        cu_js = JointState.from_position(
-            position=joint_pos, joint_names=list(self.robot.actuators.keys())
-        )
-        cu_js = JointState.get_ordered_joint_state(cu_js, self.motion_gen.kinematics.joint_names)
-        log.info(f"Current robot joint state: {cu_js}")
-        result = self.motion_gen.plan_single(cu_js, ik_goal, self.get_plan_config())
-        log.debug(f"Motion planning result:{result.success}")
-
-        if not result.success:
-            log.debug("No successful motion plan found.")
-            log.debug(f"Result: {result}")
-            return None, None, None
-
-        cmd_plan = result.get_interpolated_plan().position
-        for i in range(cmd_plan.shape[0]):
-            joint_pos[:, : self.curobo_n_dof] = cmd_plan[i : i + 1, :]
-            joint_pos[:, -self.ee_n_dof :] = torch.tensor(
-                self.robot.gripper_open_q if open_gripper else self.robot.gripper_close_q
-            )
-            actions = self.wrap_action([
-                dict(zip(self.robot.actuators.keys(), joint_pos[i_env].tolist()))
-                for i_env in range(scenario.num_envs)
-            ])
-            obs, _, _, _, _ = self.env.step(actions)
-            self.obs_saver.add(obs)
-        return 0, ee_pos_target.unsqueeze(0), ee_quat_target.unsqueeze(0)
-
-
-    def move_to_pose_batch(self, ee_pos_target: torch.Tensor, ee_quat_target: torch.Tensor, open_gripper: bool = False):
-        """Move the robot to the target pose."""
-        joint_pos = self.get_joint_pos()
-
-        ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
-        log.info(f"Target EE pose: {ik_goal}")
-        # log.info(f"Joint names: {self.motion_gen.kinematics.joint_names}")
-        cu_js = JointState.from_position(
-            position=joint_pos.repeat(ik_goal.batch, 1, 1), joint_names=list(self.robot.actuators.keys())
-        )
-        cu_js = JointState.get_ordered_joint_state(cu_js, self.motion_gen.kinematics.joint_names)
-        log.info(f"Current robot joint state: {cu_js}")
-        result = self.motion_gen.plan_batch(cu_js, ik_goal, self.get_plan_config())
-        log.debug(f"Motion planning result:{result.success}")
-
-        # choose the first successful result
-        index = next((i for i, x in enumerate(result.success.tolist()) if x), None)
-        if index is None:
-            log.debug("No successful motion plan found.")
-            log.debug(f"Result: {result}")
-            return None, None, None
-
-        if len(result.success) == 1:
-            cmd_plan = result.get_interpolated_plan().position
-        else:
-            cmd_plan = result.get_paths()[index].position
-        for i in range(cmd_plan.shape[0]):
-            joint_pos[:, : self.curobo_n_dof] = cmd_plan[i : i + 1, :]
-            joint_pos[:, -self.ee_n_dof :] = torch.tensor(
-                self.robot.gripper_open_q if open_gripper else self.robot.gripper_close_q
-            )
-            actions = [
-                {"dof_pos_target": dict(zip(self.robot.actuators.keys(), joint_pos[i_env].tolist()))}
-                for i_env in range(scenario.num_envs)
-            ]
-            obs, _, _, _, _ = self.env.step(actions)
-            self.obs_saver.add(obs)
-        return index, ee_pos_target[index : index + 1, :, :], ee_quat_target[index : index + 1, :, :]
-
-
-def world_to_franka(robot, positions, rotations, robot_offset=1.15):
-    # robot pose : 180 degree rotation around z axis
-    R_180 = np.diag([-1.0, -1.0, 1.0])
-    positions = np.array([[robot_offset, 0.0, 0.0]]) + positions @ R_180.T
-    rotations = R_180 @ rotations @ R_180.T
-    return positions, rotations
-
-
-def grasp_pose_from_tcp_pose(
-    robot_cfg: BaseRobotCfg, tcp_pos: torch.Tensor, tcp_quat: torch.Tensor, depth: float = 0.03
-):
-    """Calculate the end-effector (EE) pose from the tool center point (TCP) pose.
-
-    Note that currently only the translation is considered.
-
-    Args:
-        robot_cfg (BaseRobotCfg): Configuration object for the robot, containing the relative position of the TCP.
-        tcp_pos (torch.Tensor): The position of the TCP as a tensor.
-        tcp_quat (torch.Tensor): The orientation of the TCP as a tensor, in scalar-first quaternion.
-
-    Returns:
-        tuple[torch.Tensor, torch.Tensor]: The position and orientation of the end-effector.
-    """
-    tcp_rel_pos = (
-        (torch.tensor(robot_cfg.curobo_tcp_rel_pos) + torch.tensor([0.0, 0.0, -depth])).unsqueeze(0).to(tcp_pos.device)
-    )
-    ee_pos = tcp_pos + torch.matmul(matrix_from_quat(tcp_quat), -tcp_rel_pos.unsqueeze(-1)).squeeze()
-    return ee_pos, tcp_quat
-
-
-def grasp_to_franka(robot, grasps):
-    """Convert the grasp pose to franka end-effector pose."""
-    positions = grasps.translations.copy()
-    rotations = grasps.rotation_matrices.copy()
-    positions, rotations = world_to_franka(robot, positions, rotations)
-
-    # franka transform
-    franka_L = np.diag([1, -1, 1])
-    franka_R = np.array([[0, 0, -1], [0, 1, 0], [-1, 0, 0]])
-    rotations = franka_L @ rotations.transpose(0, 2, 1) @ franka_R
-
-    quats = R.from_matrix(rotations).as_quat()
-
-    # convert ee pose to tcp pose
-    positions, quats = grasp_pose_from_tcp_pose(
-        robot,
-        tcp_pos=torch.tensor(positions, dtype=torch.float32),
-        tcp_quat=torch.tensor(quats, dtype=torch.float32),
-        depth=0.03,
-    )
-
-    # shape of (1, n_goalset, 3)
-    ee_pos_target = positions.to("cuda:0").unsqueeze(0)
-    ee_quat_target = quats.to("cuda:0").unsqueeze(0)
-    return ee_pos_target, ee_quat_target
 
 
 @configclass
@@ -833,95 +921,6 @@ env = get_environment(scenario, sim=args.sim)
 ## Main loop
 os.makedirs("get_started/output", exist_ok=True)
 obs_saver = ObsSaver(video_path=f"get_started/output/motion_planning/3_object_grasping_vlm/{task_name}_{args.sim}.mp4")
-grasp_finder = GraspPoseFinder()
-
-# Warm up the environment by taking some dummy actions with default joint positions
-if args.sim == "mujoco":
-    dummy_action = [{"franka": {"dof_pos_target": robot.default_joint_positions}} for _ in range(scenario.num_envs)]
-elif args.sim == "isaaclab":
-    dummy_action = [{"dof_pos_target": robot.default_joint_positions} for _ in range(scenario.num_envs)]
-else:
-    raise ValueError(f"Invalid simulator: {args.sim}")
-
-for _ in range(120):
-    obs, _, _, _, _ = env.step(dummy_action)
-obs_saver.add(obs)
-
-# How many grasp candidates to consider
-N = 8
-
-# Qwen2.5-VL
-# Debug mode with fixed points
-if _debug:
-    seq = [{"pick_up": [248, 808], "put_down": [879, 704]}]
-else:
-    vlm_extractor = VLMPointExtractor()
-    img = Image.fromarray(obs.cameras["camera0"].rgb[0].cpu().numpy())
-
-    seq = vlm_extractor.extract_sequence(img, prompt)
-    assert isinstance(seq, list) and len(seq) > 0, "No valid action sequence found"
-
-# TODO: support multiple steps
-start_point = seq[0]["pick_up"]
-end_point = seq[0]["put_down"]
-
-for step in range(1):
-    log.debug(f"Step {step}")
-
-    # Get point cloud from observation
-    pcd, depth, cam_intr_mat, cam_extr_mat = get_point_cloud_from_obs(obs)
-    pcd = filter_out_robot_from_pcd(pcd)
-    motion_gen = get_curobo_models_with_pcd(pcd, robot)
-
-    gg = grasp_finder.find(pcd)
-
-    start_point_3d = get_3d_point_from_pixel(start_point, depth, cam_intr_mat, cam_extr_mat)
-    end_point_3d = get_3d_point_from_pixel(end_point, depth, cam_intr_mat, cam_extr_mat)
-    log.info(f"3d point of pixel: {start_point_3d} / {end_point_3d}")
-
-    # find the closest grasp candidate to the 3d point
-    gg = sorted_grasp_by_distance(start_point_3d, gg)
-    grasp_finder.visualize(
-        pcd,
-        gg[0:N],
-        image_only=True,
-        save_dir="3_object_grasping_vlm",
-        filename=f"qwen2.5vl_top_one_{task_name}",
-    )
-    # Select Top N batch grasp candidates and convert to franka ee pose
-    ee_pos_pickup, ee_quat_pickup = grasp_to_franka(robot, gg[:N])
-
-    tcp_pos_putdown, _ = world_to_franka(robot, np.array([end_point_3d]), np.eye(3))
-    tcp_pos_putdown = torch.tensor(tcp_pos_putdown, dtype=torch.float32).unsqueeze(1).to("cuda:0")
-    tcp_pos_putdown[0, 0, 2] += 0.3  # lift up a bit
-
-    motion_controller = MotionController(args.sim, env, motion_gen, obs_saver)
-    motion_controller.control_gripper(open_gripper=True, step=20)
-    succ_index, pos, quat = motion_controller.move_to_grasp(ee_pos_pickup, ee_quat_pickup)
-    obs_saver.save()
-    assert pos is not None, "No successful motion plan found for grasping"
-    log.info(f"Grasp {gg[succ_index]}")
-    grasp_finder.visualize(
-        pcd,
-        gg[succ_index : succ_index + 1],
-        image_only=True,
-        save_dir="3_object_grasping_vlm",
-        filename=f"gsnet_top_one_{task_name}",
-    )
-
-    # TODO: attach object to robot
-
-    # Move up
-    pos[:, :, 2] += 0.2
-    log.info(f"Moving up to {pos}, with quaternion {quat}")
-    _, pos, quat = motion_controller.move_to_pose_single(pos[0], quat[0], open_gripper=False)
-    obs_saver.save()
-    assert pos is not None, "No successful motion plan found for moving up"
-
-    # Move to putdown position
-    ee_pos_putdown, ee_quat_putdown = ee_pose_from_tcp_pose(robot, tcp_pos=tcp_pos_putdown, tcp_quat=quat)
-    motion_controller.move_to_pose_single(ee_pos_putdown[0], ee_quat_putdown[0], open_gripper=False)
-    motion_controller.control_gripper(open_gripper=True, step=40)
-
-
-obs_saver.save()
+traj_optimizer = TrajOptimizer([robot_offset, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+motion_controller = MotionController(args.sim, env, obs_saver, traj_optimizer)
+motion_controller.simulate_from_prompt(prompt)
