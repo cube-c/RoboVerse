@@ -505,10 +505,9 @@ class TrajOptimizer:
         self.motion_gen = motion_gen
 
     def do_fk(self, q: torch.Tensor):
-        # TODO: check length and truncate if needed (does it consider ee links?)
         log.info(f"q: {q}")
-        robot_state = self.kin_model.get_state(q, self.config_file["kinematics"]["ee_link"])
-        return robot_state.ee_position, robot_state.ee_quaternion
+        robot_state = self.kin_model.get_state(q[:self.curobo_n_dof], self.config_file["kinematics"]["ee_link"])
+        return robot_state.ee_position.unsqueeze(0), robot_state.ee_quaternion.unsqueeze(0)
 
 
     def get_plan_config(self):
@@ -524,13 +523,18 @@ class TrajOptimizer:
     def get_joint_state(self, joint_pos: torch.Tensor):
         cu_js = JointState.from_position(
             position=joint_pos[:, :self.curobo_n_dof],
-            joint_names=self.kin_model.joint_names
+            joint_names=list(self.kin_model.joint_names)
         )
-        cu_js = JointState.get_ordered_joint_state(cu_js, self.kin_model.joint_names)
         return cu_js
 
     def plan_gripper(self, js: JointState, open_gripper: bool, step: int = 20):
         joint_pos = js.position.squeeze().repeat(step, 1)
+        # if joint pos does not include ee dof, add zero to the end
+        if joint_pos.shape[1] != self.curobo_n_dof + self.ee_n_dof:
+            joint_pos = torch.cat([
+                joint_pos,
+                torch.zeros((joint_pos.shape[0], self.ee_n_dof), device=joint_pos.device)],
+                dim=1)
         joint_pos[:, -self.ee_n_dof :] = torch.tensor(
             self.robot_gripper_open_q if open_gripper else self.robot_gripper_close_q
         )
@@ -545,11 +549,12 @@ class TrajOptimizer:
     ):
         """Plan the grasp."""
         ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
+        log.debug(f"IK goal: {ik_goal}")
+        cu_js = JointState.get_ordered_joint_state(js, list(self.kin_model.joint_names))
         log.info(f"Target EE pose: {ik_goal}")
-        log.info(f"Joint names: {self.kin_model.joint_names}")
-        log.debug(f"Current robot joint state: {js}")
+        log.debug(f"Current robot joint state: {cu_js}")
         result = self.motion_gen.plan_grasp(
-            start_state=js,
+            start_state=cu_js,
             grasp_poses=ik_goal,
             plan_config=self.get_plan_config(),
             grasp_approach_offset=Pose(
@@ -566,7 +571,7 @@ class TrajOptimizer:
         if not result.success:
             log.debug("No successful grasp plan found.")
             log.debug(f"Result: {result}")
-            return None, None, None
+            return None
         index = result.goalset_index.item()
         log.debug(f"Grasp index: {index}")
 
@@ -593,15 +598,11 @@ class TrajOptimizer:
         open_gripper: bool = False
     ):
         """Move the robot to the target pose."""
-        cu_js = JointState.from_position(
-            position=js.position.unsqueeze(0),
-            joint_names=self.kin_model.joint_names
-        )
-        cu_js = JointState.get_ordered_joint_state(cu_js, self.kin_model.joint_names)
         ik_goal = Pose(position=ee_pos_target, quaternion=ee_quat_target)
         log.info(f"Target EE pose: {ik_goal}")
-        log.info(f"Current robot joint state: {cu_js}")
-        result = self.motion_gen.plan_single(cu_js, ik_goal, self.get_plan_config())
+        log.info(f"Current robot joint state: {js}")
+        log.info(f"Current robot position shape: {js.position.shape}")
+        result = self.motion_gen.plan_single(js, ik_goal, self.get_plan_config())
         log.debug(f"Motion planning result:{result.success}")
 
         if not result.success:
@@ -646,28 +647,31 @@ class TrajOptimizer:
             save_dir="3_object_grasping_vlm",
             filename=f"qwen2.5vl_top_one_{prompt}",
         )
+        log.info(f"Grasp candidates: {gg[:N]}")
         ee_pos_pickup, ee_quat_pickup = self._grasp_to_franka(gg[:N])
 
         # Grasp
         joint_pos = []
         joint_pos.append(self.plan_gripper(js, open_gripper=True, step=20))
-        js = self.get_joint_state(joint_pos[-1][-1:, :])
+        joint_pos.append(self.plan_grasp(js, ee_pos_pickup, ee_quat_pickup))
+        cu_js = self.get_joint_state(joint_pos[-1][-1:, :])
+        ee_pos_pickup, ee_quat_pickup = self.do_fk(cu_js.position)
 
         # Pick up
         ee_pos_pickup[:, :, 2] += 0.2
-        joint_pos.append(self.plan_pose_single(js, ee_pos_pickup[0], ee_quat_pickup[0], open_gripper=False))
-        js = self.get_joint_state(joint_pos[-1][-1:, :])
+        joint_pos.append(self.plan_pose_single(cu_js, ee_pos_pickup, ee_quat_pickup, open_gripper=False))
+        cu_js = self.get_joint_state(joint_pos[-1][-1:, :])
 
         # Put down
         tcp_pos_putdown, _ = self._world_to_franka(np.array([end_point_3d]), np.eye(3))
         tcp_pos_putdown = torch.tensor(tcp_pos_putdown, dtype=torch.float32).unsqueeze(1).to("cuda:0")
-        tcp_pos_putdown[0, 0, 2] += 0.3  # lift up a bit
-        ee_pos_putdown, ee_quat_putdown = self._ee_pose_from_tcp_pose(tcp_pos_putdown, ee_quat_pickup, depth)
-        joint_pos.append(self.plan_pose_single(js, ee_pos_putdown[0], ee_quat_putdown[0], open_gripper=False))
-        js = self.get_joint_state(joint_pos[-1][-1:, :])
+        tcp_pos_putdown[:, :, 2] += 0.3  # lift up a bit
+        ee_pos_putdown, ee_quat_putdown = self._ee_pose_from_tcp_pose(tcp_pos_putdown, ee_quat_pickup, 0.03)
+        joint_pos.append(self.plan_pose_single(cu_js, ee_pos_putdown[0], ee_quat_putdown[0], open_gripper=False))
+        cu_js = self.get_joint_state(joint_pos[-1][-1:, :])
 
         # Open Gripper
-        joint_pos.append(self.plan_gripper(js, open_gripper=True, step=20))
+        joint_pos.append(self.plan_gripper(cu_js, open_gripper=True, step=20))
 
         # TODO: attach object to robot
         # Concat All Plans
@@ -839,7 +843,8 @@ class MotionController:
         joint_reindex = self.env.handler.get_joint_reindex(self.robot.name)
         joint_pos = self.env.handler.get_states().robots[self.robot.name].joint_pos.cuda()
         js = JointState.from_position(
-            position=joint_pos[:, torch.argsort(torch.tensor(joint_reindex))], joint_names=self.robot.actuators.keys()
+            position=joint_pos[:, torch.argsort(torch.tensor(joint_reindex))],
+            joint_names=list(self.robot.actuators.keys())
         )
         log.info(f"Current robot joint state: {js}")
         return js
@@ -848,7 +853,7 @@ class MotionController:
         """Act the robot and save the observation"""
         actions = self.wrap_action(actions)
         for action in actions:
-            log.info(f"Action: {action}")
+            # log.info(f"Action: {action}")
             obs, _, _, _, _ = self.env.step([action])
             if save_obs:
                 self.obs_saver.add(obs)
@@ -921,6 +926,6 @@ env = get_environment(scenario, sim=args.sim)
 ## Main loop
 os.makedirs("get_started/output", exist_ok=True)
 obs_saver = ObsSaver(video_path=f"get_started/output/motion_planning/3_object_grasping_vlm/{task_name}_{args.sim}.mp4")
-traj_optimizer = TrajOptimizer([robot_offset, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+traj_optimizer = TrajOptimizer([robot_offset, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0])
 motion_controller = MotionController(args.sim, env, obs_saver, traj_optimizer)
 motion_controller.simulate_from_prompt(prompt)
