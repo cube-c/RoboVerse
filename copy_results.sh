@@ -10,4 +10,5 @@ OBJ=${1:-"BBQ sauce"}   # default is "BBQ sauce", or pass another name like ./co
 docker cp metasim_2:"/home/lukesong_google_com/RoboVerse/vlm_manipulation/output/gsnet_top_one_LiberoPickChocolatePudding_gsnet_visualization.png" .
 docker cp metasim_2:"/home/lukesong_google_com/RoboVerse/vlm_manipulation/output/world.ply" .
 docker cp metasim_2:"/home/lukesong_google_com/RoboVerse/vlm_manipulation/output/LiberoPickChocolatePudding_isaaclab.mp4" .
+docker cp metasim_2:"/home/lukesong_google_com/RoboVerse/vlm_manipulation/output/LiberoPickChocolatePudding_mujoco.mp4" .
 clear

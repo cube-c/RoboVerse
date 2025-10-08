@@ -5,11 +5,6 @@ from __future__ import annotations
 """This script is used to test the static scene."""
 
 
-try:
-    import isaacgym  # noqa: F401
-except ImportError:
-    pass
-
 import copy
 
 import numpy as np
@@ -42,7 +37,6 @@ from curobo.types.state import JointState
 from curobo.util_file import get_robot_path, join_path, load_yaml
 from curobo.wrap.reacher.motion_gen import MotionGen, MotionGenPlanConfig, MotionGenConfig
 from vlm_manipulation.gsnet_utils import GSNet
-from metasim.utils.math import matrix_from_quat
 
 class VLMPointExtractor:
     def __init__(self, ckpt_path="Qwen/Qwen2.5-VL-7B-Instruct"):
@@ -449,7 +443,10 @@ class TrajOptimizer:
         tcp_rel_pos = (
             (torch.tensor(self.robot_tcp_rel_pos) + torch.tensor([0.0, 0.0, -depth])).unsqueeze(0).to(tcp_pos.device)
         )
-        ee_pos = tcp_pos + torch.matmul(matrix_from_quat(tcp_quat), -tcp_rel_pos.unsqueeze(-1)).squeeze()
+        ee_pos = tcp_pos + torch.matmul(
+            matrix_from_quat(tcp_quat),
+            -tcp_rel_pos.unsqueeze(-1)
+        ).squeeze()
         return ee_pos, tcp_quat
 
     def _world_to_franka(self, positions, rotations):
@@ -659,3 +656,36 @@ class TrajOptimizer:
         # Concat All Plans
         joint_pos = torch.cat(joint_pos, dim=0)
         return joint_pos
+
+@torch.jit.script
+def matrix_from_quat(quaternions: torch.Tensor) -> torch.Tensor:
+    """Convert rotations given as quaternions to rotation matrices.
+
+    Args:
+        quaternions: The quaternion orientation in (w, x, y, z). Shape is (..., 4).
+
+    Returns:
+        Rotation matrices. The shape is (..., 3, 3).
+
+    Reference:
+        https://github.com/facebookresearch/pytorch3d/blob/main/pytorch3d/transforms/rotation_conversions.py#L41-L70
+    """
+    r, i, j, k = torch.unbind(quaternions, -1)
+    # pyre-fixme[58]: `/` is not supported for operand types `float` and `Tensor`.
+    two_s = 2.0 / (quaternions * quaternions).sum(-1)
+
+    o = torch.stack(
+        (
+            1 - two_s * (j * j + k * k),
+            two_s * (i * j - k * r),
+            two_s * (i * k + j * r),
+            two_s * (i * j + k * r),
+            1 - two_s * (i * i + k * k),
+            two_s * (j * k - i * r),
+            two_s * (i * k - j * r),
+            two_s * (j * k + i * r),
+            1 - two_s * (i * i + j * j),
+        ),
+        -1,
+    )
+    return o.reshape(quaternions.shape[:-1] + (3, 3))
