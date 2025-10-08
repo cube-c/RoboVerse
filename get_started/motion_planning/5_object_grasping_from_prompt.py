@@ -585,7 +585,8 @@ class TrajOptimizer:
 
         joint_pos = []
         joint_pos.append(trajectory_plan(result.grasp_interpolated_trajectory, open_gripper=True))
-        joint_pos.append(self.plan_gripper(js, open_gripper=False, step=20))
+        cu_js = self.get_joint_state(joint_pos[-1][-1:, :])
+        joint_pos.append(self.plan_gripper(cu_js, open_gripper=False, step=20))
         joint_pos.append(trajectory_plan(result.retract_interpolated_trajectory, open_gripper=False))
         joint_pos = torch.cat(joint_pos, dim=0)
         return joint_pos
